@@ -1,0 +1,38 @@
+# Bytecode và cache
+__pycache__/
+*.py[cod]
+*.pyo
+
+# Virtual environment
+.venv/
+venv/
+env/
+ENV/
+
+# Artefact huấn luyện / đánh giá
+artifacts/
+artifacts_level2/
+outputs/
+reports/
+ids_pipeline/reports/
+
+# Dataset thô và file sinh ra trong quá trình tiền xử lý / split
+dataset/**/*.pkl
+dataset/**/*.csv
+dataset/**/*.json
+dataset_clean*.pkl
+dataset.pkl
+dataset.csv
+
+# Notebook checkpoint
+.ipynb_checkpoints/
+
+# IDE / Editor
+.idea/
+.vscode/
+*.code-workspace
+
+# Hệ điều hành
+Thumbs.db
+*.DS_Store
+
