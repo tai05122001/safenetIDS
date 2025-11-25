@@ -222,8 +222,8 @@ def add_label_group_column(
         "dos slowloris": "dos",
         "dos slowhttptest": "dos",
         "ddos": "ddos",
-        "bot": "bot",
-        "portscan": "rare_attack",
+        "portscan": "portscan",
+        "bot": "rare_attack",
         "infiltration": "rare_attack",
         "heartbleed": "rare_attack",
     }

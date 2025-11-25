@@ -183,18 +183,18 @@ def ensure_label_group_column(
     # Tạo cột mới dựa trên label chi tiết.
     normalized_labels = df[label_col].astype(str).str.strip().str.lower()
     mapping_rules = {
-        "benign": "BENIGN",
-        "dos hulk": "DOS",
-        "dos goldeneye": "DOS",
-        "dos slowloris": "DOS",
-        "dos slowhttptest": "DOS",
-        "ddos": "DDOS",
-        "bot": "BOT",
-        "portscan": "RAREATTACK",
-        "infiltration": "RAREATTACK",
-        "heartbleed": "RAREATTACK",
+        "benign": "benign",
+        "dos hulk": "dos",
+        "dos goldeneye": "dos",
+        "dos slowloris": "dos",
+        "dos slowhttptest": "dos",
+        "ddos": "ddos",
+        "portscan": "portscan",
+        "bot": "rare_attack",
+        "infiltration": "rare_attack",
+        "heartbleed": "rare_attack",
     }
-    df[group_col] = normalized_labels.map(mapping_rules).fillna("OTHER")
+    df[group_col] = normalized_labels.map(mapping_rules).fillna("other")
     return group_col
 
 

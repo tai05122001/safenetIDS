@@ -1,34 +1,58 @@
 """
-Huấn luyện mô hình IDS Level 2 cho từng nhóm (ví dụ: DOS, RareAttack).
+Huấn luyện mô hình IDS Level 2 cho từng nhóm (ví dụ: DOS, RareAttack, PortScan).
 Script đọc dữ liệu đã split trong thư mục level2/<group>/ và huấn luyện mô hình con phân biệt nhãn chi tiết.
+
+Hỗ trợ nhiều loại model: Random Forest, XGBoost, LightGBM, hoặc Ensemble Voting.
+Ensemble Voting: Kết hợp nhiều model, dự đoán label được vote nhiều nhất.
 
 Ví dụ chạy:
 python ids_pipeline/train_model_level2.py \
-    --group dos \
-    --splits-dir dataset/splits_hierarchical/level2/dos \
+    --groups dos rare_attack portscan \
+    --model-type ensemble \
+    --splits-dir dataset/splits/level2 \
     --label-column label_encoded \
     --drop-columns label \
-    --output-dir outputs/level2/dos
+    --output-dir artifacts_level2
 """
-from __future__ import annotations
+from __future__ import annotations  # Cho phép dùng type hints mới
 
-import argparse
-import json
-import logging
-from pathlib import Path
-from typing import Dict, List, Tuple
+# ==================== IMPORTS ====================
+import argparse  # Đọc và parse tham số từ dòng lệnh
+import json  # Ghi/đọc dữ liệu dạng JSON
+import logging  # Ghi log quá trình chạy
+from pathlib import Path  # Làm việc với đường dẫn file/thư mục
+from typing import Dict, List, Tuple  # Type hints
 
-import joblib
-import numpy as np
-import pandas as pd
-import subprocess
-import sys
-from sklearn.compose import ColumnTransformer
-from sklearn.ensemble import RandomForestClassifier
-from sklearn.impute import SimpleImputer
-from sklearn.metrics import classification_report, confusion_matrix
-from sklearn.pipeline import Pipeline
-from sklearn.preprocessing import OneHotEncoder, StandardScaler
+import joblib  # Lưu/load pipeline sklearn
+import numpy as np  # Hỗ trợ thao tác số học
+import pandas as pd  # Đọc/ghi DataFrame
+import subprocess  # Gọi script split_dataset.py khi cần
+import sys  # Lấy python executable hiện tại
+
+# Sklearn imports cho preprocessing và pipeline
+from sklearn.compose import ColumnTransformer  # Pipeline tiền xử lý cho nhiều loại cột
+from sklearn.impute import SimpleImputer  # Điền giá trị thiếu
+from sklearn.metrics import classification_report, confusion_matrix  # Metric đánh giá
+from sklearn.pipeline import Pipeline  # Kết hợp tiền xử lý + mô hình
+from sklearn.preprocessing import OneHotEncoder, StandardScaler  # Mã hóa và chuẩn hóa
+
+# Sklearn imports cho các model classification
+from sklearn.ensemble import (
+    RandomForestClassifier,  # Random Forest
+    ExtraTreesClassifier,  # Extra Trees
+    VotingClassifier,  # Ensemble voting - kết hợp nhiều model
+)
+
+# Gradient Boosting models (cần cài: pip install xgboost lightgbm)
+try:
+    from xgboost import XGBClassifier  # XGBoost
+except ImportError:
+    XGBClassifier = None
+
+try:
+    from lightgbm import LGBMClassifier  # LightGBM
+except ImportError:
+    LGBMClassifier = None
 
 
 def make_json_safe(value):
@@ -78,8 +102,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--drop-columns",
         nargs="*",
-        default=["label"],
-        help="Danh sách các cột bỏ qua khi huấn luyện (ví dụ: label gốc).",
+        default=["label_group", "label"],
+        help="Danh sách các cột bỏ qua khi huấn luyện (ví dụ: label_group, label gốc).",
     )
     parser.add_argument(
         "--sample-frac",
@@ -123,7 +147,20 @@ def parse_args() -> argparse.Namespace:
         default=Path("scripts/split_dataset.py"),
         help="Đường dẫn script split_dataset.py (mặc định: scripts/split_dataset.py).",
     )
-    return parser.parse_args()
+    parser.add_argument(
+        "--model-type",
+        choices=["random_forest", "xgboost", "lightgbm", "ensemble", "voting"],
+        default="ensemble",
+        help=(
+            "Loại model sử dụng: "
+            "random_forest (Random Forest đơn), "
+            "xgboost (XGBoost đơn), "
+            "lightgbm (LightGBM đơn), "
+            "ensemble/voting (kết hợp nhiều model, chọn label được vote nhiều nhất). "
+            "Mặc định: ensemble."
+        ),
+    )
+    return parser.parse_args()  # Parse và trả về namespace
 
 
 def setup_logging() -> None:
@@ -199,15 +236,152 @@ def build_preprocess_transformer(features: pd.DataFrame) -> ColumnTransformer:
     )
 
 
-def build_model_pipeline(preprocessor: ColumnTransformer) -> Pipeline:
-    classifier = RandomForestClassifier(
-        n_estimators=300,
-        max_depth=None,
-        n_jobs=-1,
-        random_state=42,
-        class_weight="balanced_subsample",
-    )
-    return Pipeline(steps=[("preprocess", preprocessor), ("classifier", classifier)])
+def build_model_pipeline(
+    preprocessor: ColumnTransformer, model_type: str = "ensemble"
+) -> Pipeline:
+    """
+    Xây dựng pipeline gồm preprocessor + classifier.
+    
+    Args:
+        preprocessor: ColumnTransformer đã được fit với dữ liệu train
+        model_type: Loại model sử dụng (random_forest, xgboost, lightgbm, ensemble)
+    
+    Returns:
+        Pipeline sklearn kết hợp preprocessing + classification
+    """
+    # ========== RANDOM FOREST ==========
+    if model_type == "random_forest":
+        classifier = RandomForestClassifier(
+            n_estimators=300,  # Số lượng decision trees
+            max_depth=None,  # Không giới hạn độ sâu
+            n_jobs=-1,  # Sử dụng tất cả CPU cores
+            random_state=42,  # Seed để tái lập
+            class_weight="balanced_subsample",  # Cân bằng class weights
+        )
+        return Pipeline(steps=[("preprocess", preprocessor), ("classifier", classifier)])
+    
+    # ========== XGBOOST ==========
+    elif model_type == "xgboost":
+        if XGBClassifier is None:
+            raise ImportError("XGBoost chưa được cài đặt. Chạy: pip install xgboost")
+        classifier = XGBClassifier(
+            n_estimators=300,  # Số lượng boosting rounds
+            max_depth=6,  # Độ sâu tối đa
+            learning_rate=0.1,  # Tốc độ học
+            random_state=42,  # Seed
+            n_jobs=-1,  # Parallel processing
+            eval_metric="mlogloss",  # Metric đánh giá
+        )
+        return Pipeline(steps=[("preprocess", preprocessor), ("classifier", classifier)])
+    
+    # ========== LIGHTGBM ==========
+    elif model_type == "lightgbm":
+        if LGBMClassifier is None:
+            raise ImportError("LightGBM chưa được cài đặt. Chạy: pip install lightgbm")
+        classifier = LGBMClassifier(
+            n_estimators=300,  # Số lượng boosting rounds
+            max_depth=6,  # Độ sâu tối đa
+            learning_rate=0.1,  # Tốc độ học
+            random_state=42,  # Seed
+            n_jobs=-1,  # Parallel processing
+            class_weight="balanced",  # Cân bằng class weights
+        )
+        return Pipeline(steps=[("preprocess", preprocessor), ("classifier", classifier)])
+    
+    # ========== ENSEMBLE VOTING ==========
+    elif model_type in ["ensemble", "voting"]:
+        # Kết hợp nhiều model, label được vote nhiều nhất sẽ là kết quả
+        estimators = []
+        
+        # 1. Random Forest
+        estimators.append(
+            (
+                "rf",
+                RandomForestClassifier(
+                    n_estimators=200,
+                    max_depth=None,
+                    n_jobs=-1,
+                    random_state=42,
+                    class_weight="balanced_subsample",
+                ),
+            )
+        )
+        
+        # 2. Extra Trees
+        estimators.append(
+            (
+                "et",
+                ExtraTreesClassifier(
+                    n_estimators=200,
+                    max_depth=None,
+                    n_jobs=-1,
+                    random_state=42,
+                    class_weight="balanced_subsample",
+                ),
+            )
+        )
+        
+        # 3. XGBoost
+        if XGBClassifier is not None:
+            estimators.append(
+                (
+                    "xgb",
+                    XGBClassifier(
+                        n_estimators=200,
+                        max_depth=6,
+                        learning_rate=0.1,
+                        random_state=42,
+                        n_jobs=-1,
+                        eval_metric="mlogloss",
+                    ),
+                )
+            )
+        else:
+            logging.warning("XGBoost chưa được cài, bỏ qua trong ensemble")
+        
+        # 4. LightGBM
+        if LGBMClassifier is not None:
+            estimators.append(
+                (
+                    "lgbm",
+                    LGBMClassifier(
+                        n_estimators=200,
+                        max_depth=6,
+                        learning_rate=0.1,
+                        random_state=42,
+                        n_jobs=-1,
+                        class_weight="balanced",
+                    ),
+                )
+            )
+        else:
+            logging.warning("LightGBM chưa được cài, bỏ qua trong ensemble")
+        
+        if len(estimators) < 2:
+            raise ValueError(
+                "Cần ít nhất 2 models để ensemble. "
+                "Hãy cài đặt XGBoost và/hoặc LightGBM: pip install xgboost lightgbm"
+            )
+        
+        # VotingClassifier: majority vote (hard voting)
+        classifier = VotingClassifier(
+            estimators=estimators,  # Danh sách các models
+            voting="hard",  # Chọn label được vote nhiều nhất
+            n_jobs=-1,  # Parallel processing
+        )
+        
+        logging.info(
+            "Sử dụng Ensemble Voting với %d models: %s",
+            len(estimators),
+            [name for name, _ in estimators],
+        )
+        return Pipeline(steps=[("preprocess", preprocessor), ("classifier", classifier)])
+    
+    else:
+        raise ValueError(
+            f"Model type không hợp lệ: {model_type}. "
+            "Chọn một trong: random_forest, xgboost, lightgbm, ensemble, voting"
+        )
 
 
 def evaluate_model(
@@ -258,17 +432,18 @@ def save_artifacts(
 
 def run_training_pipeline(
     *,
-    group: str,
-    splits_dir: Path | str,
-    source_dataset: Path | str,
-    auto_split: bool,
-    split_script: Path | str,
-    train_variant: str,
-    label_column: str,
-    drop_columns: List[str] | None,
-    sample_frac: float | None,
-    output_dir: Path | str,
-    random_state: int,
+    group: str,  # Tên nhóm (dos, rare_attack, portscan, etc.)
+    splits_dir: Path | str,  # Thư mục chứa splits
+    source_dataset: Path | str,  # Dataset nguồn
+    auto_split: bool,  # Tự động split nếu cần
+    split_script: Path | str,  # Đường dẫn script split
+    train_variant: str,  # train_raw hay train_balanced
+    label_column: str,  # Tên cột label
+    drop_columns: List[str] | None,  # Các cột cần bỏ qua
+    sample_frac: float | None,  # Tỷ lệ sample
+    output_dir: Path | str,  # Thư mục lưu artifacts
+    random_state: int,  # Seed
+    model_type: str = "ensemble",  # Loại model sử dụng
 ) -> Dict[str, object]:
     setup_logging()
 
@@ -344,10 +519,16 @@ def run_training_pipeline(
     X_test, y_test, _, _ = prepare_features_labels(df_test, label_column, effective_drop)
     logging.info("Sử dụng cột nhãn: %s", label_actual)
 
+    # Xây dựng pipeline tiền xử lý và mô hình
     preprocessor = build_preprocess_transformer(X_train)
-    pipeline = build_model_pipeline(preprocessor)
+    pipeline = build_model_pipeline(preprocessor, model_type=model_type)
 
-    logging.info("Bắt đầu huấn luyện RandomForest (group=%s, train=%d)...", normalized_group, X_train.shape[0])
+    logging.info(
+        "Bắt đầu huấn luyện %s (group=%s, train=%d)...",
+        model_type.upper(),
+        normalized_group,
+        X_train.shape[0],
+    )
     pipeline.fit(X_train, y_train)
     logging.info("Huấn luyện hoàn tất.")
 
@@ -366,7 +547,7 @@ def run_training_pipeline(
         "drop_columns_requested": effective_drop,
         "drop_columns_resolved": drop_cols_resolved,
         "random_state": random_state,
-        "model_type": "RandomForestClassifier",
+        "model_type": model_type,  # Lưu loại model đã sử dụng
         "class_labels": sorted(y_train.unique()),
     }
 
@@ -386,11 +567,19 @@ def run_training_pipeline(
 
 
 def main() -> None:
+    """
+    Hàm main: Điểm vào chính của script.
+    
+    Huấn luyện model level 2 cho từng nhóm trong danh sách groups.
+    """
     args = parse_args()
+    setup_logging()  # Setup logging
+    
+    # Huấn luyện cho từng nhóm trong danh sách
     for group in args.groups:
-        group = group.lower()
-        splits_dir = Path(args.splits_dir) / group
-        output_dir = Path(args.output_dir) / group
+        group = group.lower()  # Chuẩn hóa tên nhóm về lowercase
+        splits_dir = Path(args.splits_dir) / group  # Thư mục splits cho nhóm này
+        output_dir = Path(args.output_dir) / group  # Thư mục output cho nhóm này
         logging.info("=== Huấn luyện Level 2 cho nhóm: %s ===", group)
         run_training_pipeline(
             group=group,
@@ -404,6 +593,7 @@ def main() -> None:
             sample_frac=args.sample_frac,
             output_dir=output_dir,
             random_state=args.random_state,
+            model_type=args.model_type,  # Loại model sử dụng
         )
 
 

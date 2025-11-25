@@ -7,3 +7,8 @@ kafka-python>=2.0.2
 streamlit>=1.28
 seaborn>=0.13
 # tensorflow>=2.15  # Tuỳ chọn: chỉ cần nếu muốn lưu pipeline dưới định dạng .h5
+
+# Gradient Boosting models (cần cho ensemble voting và các model riêng lẻ)
+# Nếu chỉ dùng random_forest thì có thể bỏ qua
+xgboost>=2.0.0  # XGBoost - gradient boosting mạnh mẽ
+lightgbm>=4.0.0  # LightGBM - gradient boosting nhanh và hiệu quả
