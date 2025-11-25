@@ -159,3 +159,5 @@ Mỗi nhóm có báo cáo riêng trong `reports/level2_eval/<group>/`.
 - Khi thêm chức năng mới, đảm bảo cập nhật README và `Thiet_ke_trien_khai_IDS.md`.
 
 
+#Kafka 
+Cluster Id: C-hMYQOuTx2IZpRCXaaHqg
