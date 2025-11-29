@@ -29,9 +29,9 @@ class AlertingService:
     """Service tạo và quản lý alerts từ kết quả predictions"""
 
     def __init__(self,
-                 kafka_bootstrap_servers='localhost:9092',
-                 input_topic='level2_predictions',
-                 output_topic='ids_alerts',
+                 kafka_bootstrap_servers='127.0.0.1:9092',
+                 input_topic='level_2_predictions',
+                 output_topic='alert',
                  db_path='services/data/alerts.db',
                  alert_thresholds=None):
         """
@@ -572,11 +572,11 @@ def main():
     import argparse
 
     parser = argparse.ArgumentParser(description='Safenet IDS - Alerting Service')
-    parser.add_argument('--kafka-servers', default='localhost:9092',
+    parser.add_argument('--kafka-servers', default='127.0.0.1:9092',
                        help='Kafka bootstrap servers')
-    parser.add_argument('--input-topic', default='level2_predictions',
+    parser.add_argument('--input-topic', default='level_2_predictions',
                        help='Input topic name (Level 2 predictions)')
-    parser.add_argument('--output-topic', default='ids_alerts',
+    parser.add_argument('--output-topic', default='alert',
                        help='Output topic name (IDS alerts)')
     parser.add_argument('--db-path', default='services/data/alerts.db',
                        help='Path to alerts database')

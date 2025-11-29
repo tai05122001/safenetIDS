@@ -66,8 +66,8 @@ class DataPreprocessingService:
 
     def __init__(self,
                  kafka_bootstrap_servers='localhost:9092',
-                 input_topic='raw_network_events',
-                 output_topic='preprocessed_events'):
+                 input_topic='raw_data_event',
+                 output_topic='preprocess_data'):
         """
         Khởi tạo Data Preprocessing Service
 
@@ -505,9 +505,9 @@ def main():
     parser = argparse.ArgumentParser(description='Safenet IDS - Data Preprocessing Service')
     parser.add_argument('--kafka-servers', default='localhost:9092',
                        help='Kafka bootstrap servers')
-    parser.add_argument('--input-topic', default='raw_network_events',
+    parser.add_argument('--input-topic', default='raw_data_event',
                        help='Input topic name')
-    parser.add_argument('--output-topic', default='preprocessed_events',
+    parser.add_argument('--output-topic', default='preprocess_data',
                        help='Output topic name')
 
     args = parser.parse_args()

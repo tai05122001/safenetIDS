@@ -30,8 +30,8 @@ class Level2PredictionService:
 
     def __init__(self,
                  kafka_bootstrap_servers='localhost:9092',
-                 input_topic='level1_predictions',
-                 output_topic='level2_predictions',
+                 input_topic='level_1_predictions',
+                 output_topic='level_2_predictions',
                  models_base_path='artifacts_level2'):
         """
         Khởi tạo Level 2 Prediction Service
@@ -387,9 +387,9 @@ def main():
     parser = argparse.ArgumentParser(description='Safenet IDS - Level 2 Prediction Service')
     parser.add_argument('--kafka-servers', default='localhost:9092',
                        help='Kafka bootstrap servers')
-    parser.add_argument('--input-topic', default='level1_predictions',
+    parser.add_argument('--input-topic', default='level_1_predictions',
                        help='Input topic name (Level 1 predictions)')
-    parser.add_argument('--output-topic', default='level2_predictions',
+    parser.add_argument('--output-topic', default='level_2_predictions',
                        help='Output topic name (Level 2 predictions)')
     parser.add_argument('--models-base-path', default='artifacts_level2',
                        help='Base path for Level 2 models')
