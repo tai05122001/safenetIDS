@@ -36,8 +36,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--groups",
         nargs="*",
-        default=["dos", "rare_attack"],
-        help="Danh sách nhóm cần đánh giá (mặc định: dos rare_attack).",
+        default=["dos"],
+        help="Danh sách nhóm cần đánh giá (mặc định: dos). Đã bỏ rare_attack khỏi dataset.",
     )
     parser.add_argument(
         "--splits-root",
@@ -207,8 +207,7 @@ def main() -> None:
 
     for group in args.groups:
         normalized_group = group.strip().lower().replace("-", "_")
-        if normalized_group == "rareattack":
-            normalized_group = "rare_attack"
+        # Đã bỏ rare_attack khỏi dataset, không cần normalize nữa
         evaluate_group(normalized_group, args)
 
 

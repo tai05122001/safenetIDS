@@ -90,7 +90,11 @@ def parse_args() -> argparse.Namespace:
         "--scale-method",
         choices=("none", "standard", "minmax"),
         default="none",
-        help="Chuẩn hóa dữ liệu số: none, standard (z-score) hoặc minmax (0-1).",
+        help=(
+            "Chuẩn hóa dữ liệu số: none (mặc định), standard (z-score) hoặc minmax (0-1). "
+            "⚠️ CẢNH BÁO: Nên để 'none' vì model training pipeline đã có StandardScaler. "
+            "Nếu scale ở đây sẽ bị double scaling → kết quả prediction sai!"
+        ),
     )
     parser.add_argument(
         "--one-hot",
@@ -215,6 +219,8 @@ def add_label_group_column(
         return df, {}
 
     # Định nghĩa mapping từ nhãn chi tiết sang nhóm tổng quát.
+    # Chỉ giữ lại: benign, dos, ddos, portscan
+    # Đã bỏ: Bot, Infiltration, Heartbleed
     group_rules = {
         "benign": "benign",
         "dos hulk": "dos",
@@ -223,9 +229,7 @@ def add_label_group_column(
         "dos slowhttptest": "dos",
         "ddos": "ddos",
         "portscan": "portscan",
-        "bot": "rare_attack",
-        "infiltration": "rare_attack",
-        "heartbleed": "rare_attack",
+        # Bot, Infiltration, Heartbleed đã được loại bỏ ở bước trước
     }
 
     default_group = "other"  # Phân loại mặc định cho nhãn chưa định nghĩa.
@@ -241,6 +245,70 @@ def add_label_group_column(
     group_series = cleaned_series.map(mapping_report)
     df[group_col] = group_series  # Gán vào DataFrame.
     return df, mapping_report
+
+
+def add_binary_label_column(
+    df: pd.DataFrame,
+    group_col: str,
+    binary_col: str = "label_binary_encoded"
+) -> pd.DataFrame:
+    """Tạo cột binary label: 0=benign, 1=attack (gộp dos, ddos, portscan)"""
+    if group_col not in df.columns:
+        print(f"Không tìm thấy cột nhóm {group_col} để tạo binary label.")
+        return df
+    
+    if binary_col in df.columns:
+        print(f"Cột {binary_col} đã tồn tại, bỏ qua.")
+        return df
+    
+    def map_to_binary(group_value):
+        if pd.isna(group_value):
+            return 0
+        group_str = str(group_value).lower().strip()
+        if group_str == "benign":
+            return 0
+        else:  # dos, ddos, portscan, other -> attack
+            return 1
+    
+    df[binary_col] = df[group_col].apply(map_to_binary)
+    print(f"Đã tạo cột binary label: {binary_col}")
+    print(f"Binary distribution: {df[binary_col].value_counts().to_dict()}")
+    return df
+
+
+def add_attack_type_label_column(
+    df: pd.DataFrame,
+    group_col: str,
+    attack_type_col: str = "label_attack_type_encoded"
+) -> pd.DataFrame:
+    """Tạo cột attack type label: 0=dos, 1=ddos, 2=portscan (chỉ cho attack, benign = -1)"""
+    if group_col not in df.columns:
+        print(f"Không tìm thấy cột nhóm {group_col} để tạo attack type label.")
+        return df
+    
+    if attack_type_col in df.columns:
+        print(f"Cột {attack_type_col} đã tồn tại, bỏ qua.")
+        return df
+    
+    def map_to_attack_type(group_value):
+        if pd.isna(group_value):
+            return -1
+        group_str = str(group_value).lower().strip()
+        if group_str == "benign":
+            return -1  # Không phải attack
+        elif group_str == "dos":
+            return 0
+        elif group_str == "ddos":
+            return 1
+        elif group_str == "portscan":
+            return 2
+        else:
+            return -1  # Unknown
+    
+    df[attack_type_col] = df[group_col].apply(map_to_attack_type)
+    print(f"Đã tạo cột attack type label: {attack_type_col}")
+    print(f"Attack type distribution: {df[attack_type_col].value_counts().to_dict()}")
+    return df
 
 
 def drop_sparse_columns(
@@ -432,6 +500,25 @@ def main() -> None:
     df = load_raw_dataframe(source_path, fallback_csv)
     print(f"Dataset gốc: {df.shape[0]} rows x {df.shape[1]} columns")
 
+    # 1.1. Loại bỏ các nhãn không cần thiết: Bot, Infiltration, Heartbleed
+    labels_to_remove = ['Bot', 'Infiltration', 'Heartbleed', 'bot', 'infiltration', 'heartbleed']
+    before_remove = len(df)
+    
+    # Tìm cột label thực tế (có thể có khoảng trắng hoặc tên khác)
+    actual_label_col = None
+    label_col_normalized = args.label_column.strip().lower()
+    for col in df.columns:
+        if col.strip().lower() == label_col_normalized or 'label' in col.lower():
+            actual_label_col = col
+            break
+    
+    if actual_label_col:
+        df = df[~df[actual_label_col].astype(str).str.strip().str.lower().isin([l.lower() for l in labels_to_remove])]
+        removed_count = before_remove - len(df)
+        if removed_count > 0:
+            print(f"Đã loại bỏ {removed_count} mẫu với nhãn: {', '.join(labels_to_remove)}")
+            print(f"Dataset sau khi loại bỏ: {df.shape[0]} rows x {df.shape[1]} columns")
+
     # 2. Chuẩn hóa tên cột để dễ thao tác ở các bước sau.
     # Chuẩn hóa toàn bộ tên cột để đảm bảo các bước xử lý sau không bị lỗi vì ký tự lạ.
     df.columns = [normalize_column(col) for col in df.columns]
@@ -462,11 +549,26 @@ def main() -> None:
         label_group_col = normalize_column(args.label_group_column)
         df, label_group_mapping = add_label_group_column(df, label_col, label_group_col)
         df, label_group_encoded_mapping = encode_label(df, label_group_col)
+        
+        # Tạo binary label và attack type label cho Level 1 và Level 2
+        # Không cần encode vì chúng đã là số (0/1 hoặc 0/1/2/-1)
+        binary_col = normalize_column("label_binary_encoded")
+        attack_type_col = normalize_column("label_attack_type_encoded")
+        df = add_binary_label_column(df, label_group_col, binary_col)
+        df = add_attack_type_label_column(df, label_group_col, attack_type_col)
+        # Không encode binary và attack_type vì chúng đã là số rồi
 
     # Tập các cột cần bỏ qua (giữ nguyên) ở những bước xử lý khác.
     skip_cols = {label_col, f"{label_col}_encoded"}
     if label_group_col:
         skip_cols.update({label_group_col, f"{label_group_col}_encoded"})
+        # Thêm binary và attack type columns vào skip_cols (không có _encoded vì chúng đã là số)
+        binary_col = normalize_column("label_binary_encoded")
+        attack_type_col = normalize_column("label_attack_type_encoded")
+        if binary_col in df.columns:
+            skip_cols.add(binary_col)
+        if attack_type_col in df.columns:
+            skip_cols.add(attack_type_col)
 
     # 7. Loại bỏ các cột có quá nhiều giá trị thiếu (quality control).
     df, sparse_dropped = drop_sparse_columns(df, args.min_non_null_ratio, skip_cols)
@@ -517,12 +619,32 @@ def main() -> None:
         )
 
     # 12. Chuẩn hóa giá trị số về cùng thang đo (Standard/MinMax) để mô hình dễ học.
+    # ⚠️ LƯU Ý QUAN TRỌNG: Model training pipeline (train_level1_rf.py, train_level2_rf.py)
+    # đã có StandardScaler trong ColumnTransformer. Nếu scale ở đây sẽ bị DOUBLE SCALING
+    # → Model sẽ scale lại data đã được scale → kết quả prediction SAI!
+    # → Nên để scale_method="none" (mặc định) và để model tự scale khi training.
     scaling_stats: dict[str, dict[str, float]] = {}
     if args.scale_method != "none":
+        print("=" * 80)
+        print("⚠️  CẢNH BÁO NGHIÊM TRỌNG: DOUBLE SCALING DETECTED!")
+        print("=" * 80)
+        print("⚠️  Bạn đang scale data trong preprocessing!")
+        print("⚠️  Model training pipeline (train_level1_rf.py, train_level2_rf.py) đã có StandardScaler.")
+        print("⚠️  Model sẽ scale lại data đã được scale → DOUBLE SCALING!")
+        print("⚠️  Kết quả: Prediction sẽ SAI hoàn toàn!")
+        print("=" * 80)
+        print("✓ Khuyến nghị: Sử dụng --scale-method none (mặc định)")
+        print("✓ Model sẽ tự scale data khi training với StandardScaler trong pipeline")
+        print("=" * 80)
+        # Vẫn tiếp tục scale nếu user yêu cầu, nhưng cảnh báo rõ ràng
         numeric_cols = df.select_dtypes(include=["number"]).columns.difference(skip_cols)
         df, scaling_stats = scale_numeric_features(df, numeric_cols, args.scale_method)
         if scaling_stats:
-            print(f"Đã scale {len(scaling_stats)} cột theo phương pháp {args.scale_method}.")
+            print(f"⚠️  Đã scale {len(scaling_stats)} cột theo phương pháp {args.scale_method}.")
+            print("⚠️  LƯU Ý: Model sẽ scale lại data này → DOUBLE SCALING!")
+            print("⚠️  Kết quả prediction sẽ SAI! Vui lòng retrain với --scale-method none!")
+    else:
+        print("✓ Không scale data trong preprocessing (đúng - model sẽ tự scale khi training).")
 
     if args.summary:
         print_summary(df, label_col)

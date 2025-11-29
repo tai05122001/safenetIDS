@@ -38,7 +38,14 @@ from sklearn.ensemble import (
     RandomForestClassifier,  # Random Forest - ensemble của decision trees
     ExtraTreesClassifier,  # Extra Trees - biến thể của RF với randomness cao hơn
     VotingClassifier,  # Ensemble voting - kết hợp nhiều model, chọn label được vote nhiều nhất
+    GradientBoostingClassifier,  # Gradient Boosting (sklearn native)
+    AdaBoostClassifier,  # Adaptive Boosting
+    BaggingClassifier,  # Bagging ensemble
 )
+from sklearn.tree import DecisionTreeClassifier  # Decision Tree đơn
+from sklearn.linear_model import LogisticRegression  # Logistic Regression
+from sklearn.neural_network import MLPClassifier  # Multi-layer Perceptron (Neural Network)
+from sklearn.svm import SVC  # Support Vector Classifier
 
 # Gradient Boosting models (cần cài: pip install xgboost lightgbm)
 try:
@@ -50,6 +57,12 @@ try:
     from lightgbm import LGBMClassifier  # LightGBM - gradient boosting nhanh và hiệu quả
 except ImportError:
     LGBMClassifier = None  # Nếu chưa cài thì set None
+
+# CatBoost (optional - cần cài: pip install catboost)
+try:
+    from catboost import CatBoostClassifier  # CatBoost - gradient boosting với categorical support
+except ImportError:
+    CatBoostClassifier = None  # Nếu chưa cài thì set None
 
 
 def make_json_safe(value):
@@ -435,7 +448,7 @@ def build_model_pipeline(
             (
                 "rf",  # Tên identifier cho model này
                 RandomForestClassifier(
-                    n_estimators=200,  # Giảm số trees vì có nhiều model khác
+                    n_estimators=100,  # Giảm số trees để tăng tốc training
                     max_depth=None,  # Không giới hạn độ sâu
                     n_jobs=-1,  # Parallel processing
                     random_state=42,  # Seed
@@ -449,7 +462,7 @@ def build_model_pipeline(
             (
                 "et",
                 ExtraTreesClassifier(
-                    n_estimators=200,  # Số trees
+                    n_estimators=100,  # Giảm số trees để tăng tốc training
                     max_depth=None,  # Không giới hạn độ sâu
                     n_jobs=-1,  # Parallel processing
                     random_state=42,  # Seed
@@ -458,47 +471,158 @@ def build_model_pipeline(
             )
         )
         
-        # 3. XGBoost - gradient boosting mạnh mẽ
-        if XGBClassifier is not None:
-            estimators.append(
-                (
-                    "xgb",
-                    XGBClassifier(
-                        n_estimators=200,  # Số boosting rounds
-                        max_depth=6,  # Độ sâu tối đa
-                        learning_rate=0.1,  # Tốc độ học
-                        random_state=42,  # Seed
-                        n_jobs=-1,  # Parallel processing
-                        eval_metric="mlogloss",  # Metric đánh giá
-                    ),
-                )
+        # 3. GradientBoostingClassifier (sklearn native) - khác với XGBoost/LightGBM
+        estimators.append(
+            (
+                "gbc",
+                GradientBoostingClassifier(
+                    n_estimators=80,  # Giảm số boosting rounds để tăng tốc
+                    max_depth=5,  # Độ sâu tối đa
+                    learning_rate=0.1,  # Tốc độ học
+                    random_state=42,  # Seed
+                    subsample=0.8,  # Fraction of samples for each tree
+                ),
             )
-        else:
-            logging.warning("XGBoost chưa được cài, bỏ qua trong ensemble")
+        )
         
-        # 4. LightGBM - gradient boosting nhanh
-        if LGBMClassifier is not None:
+        # 4. AdaBoostClassifier - Adaptive Boosting với Decision Tree base
+        # Lưu ý: sklearn >= 1.2 dùng 'estimator', < 1.2 dùng 'base_estimator'
+        try:
+            ada_estimator = AdaBoostClassifier(
+                estimator=DecisionTreeClassifier(
+                    max_depth=3,  # Shallow trees cho AdaBoost
+                    random_state=42,
+                    class_weight="balanced",
+                ),
+                n_estimators=50,  # Giảm số weak learners để tăng tốc
+                learning_rate=0.8,  # Tốc độ học
+                random_state=42,
+            )
+        except TypeError:
+            # Fallback cho sklearn < 1.2
+            ada_estimator = AdaBoostClassifier(
+                base_estimator=DecisionTreeClassifier(
+                    max_depth=3,
+                    random_state=42,
+                    class_weight="balanced",
+                ),
+                n_estimators=50,  # Giảm số weak learners để tăng tốc
+                learning_rate=0.8,
+                random_state=42,
+            )
+        estimators.append(("ada", ada_estimator))
+        
+        # 5. DecisionTreeClassifier với max_depth khác - đơn giản nhưng hiệu quả
+        estimators.append(
+            (
+                "dt_deep",
+                DecisionTreeClassifier(
+                    max_depth=15,  # Độ sâu lớn hơn
+                    min_samples_split=10,  # Minimum samples để split
+                    min_samples_leaf=5,  # Minimum samples ở leaf
+                    random_state=42,
+                    class_weight="balanced",
+                ),
+            )
+        )
+        
+        # 6. LogisticRegression - Linear model, khác hoàn toàn với tree-based
+        estimators.append(
+            (
+                "lr",
+                LogisticRegression(
+                    max_iter=500,  # Giảm số iterations để tăng tốc
+                    random_state=42,
+                    class_weight="balanced",  # Cân bằng classes
+                    n_jobs=-1,  # Parallel processing
+                    solver="lbfgs",  # Solver cho multi-class
+                    multi_class="multinomial",  # Multi-class strategy
+                ),
+            )
+        )
+        
+        # 7. MLPClassifier - Neural Network, khác với tree-based models
+        estimators.append(
+            (
+                "mlp",
+                MLPClassifier(
+                    hidden_layer_sizes=(100, 50),  # 2 hidden layers: 100 và 50 neurons
+                    max_iter=300,  # Giảm số iterations để tăng tốc
+                    random_state=42,
+                    early_stopping=True,  # Early stopping để tránh overfitting
+                    validation_fraction=0.1,  # 10% data cho validation
+                    n_iter_no_change=10,  # Stop nếu không cải thiện sau 10 iterations
+                    learning_rate_init=0.01,  # Learning rate
+                    solver="adam",  # Adam optimizer
+                ),
+            )
+        )
+        
+        # 8. CatBoost - Nếu có, thêm vào (tốt với categorical features)
+        if CatBoostClassifier is not None:
             estimators.append(
                 (
-                    "lgbm",
-                    LGBMClassifier(
-                        n_estimators=200,  # Số boosting rounds
-                        max_depth=6,  # Độ sâu tối đa
+                    "catboost",
+                    CatBoostClassifier(
+                        iterations=80,  # Giảm số boosting rounds để tăng tốc
+                        depth=6,  # Độ sâu
                         learning_rate=0.1,  # Tốc độ học
-                        random_state=42,  # Seed
-                        n_jobs=-1,  # Parallel processing
-                        class_weight="balanced",  # Cân bằng classes
+                        random_state=42,
+                        verbose=False,  # Không log chi tiết
+                        class_weights="balanced",  # Cân bằng classes
                     ),
                 )
             )
         else:
-            logging.warning("LightGBM chưa được cài, bỏ qua trong ensemble")
+            logging.warning("CatBoost chưa được cài, bỏ qua trong ensemble")
+        
+        # 9. BaggingClassifier với DecisionTree - Ensemble của ensembles
+        # Lưu ý: sklearn >= 1.2 dùng 'estimator', < 1.2 dùng 'base_estimator'
+        try:
+            bagging_estimator = BaggingClassifier(
+                estimator=DecisionTreeClassifier(
+                    max_depth=10,
+                    random_state=42,
+                    class_weight="balanced",
+                ),
+                n_estimators=30,  # Giảm số base estimators để tăng tốc
+                random_state=42,
+                n_jobs=-1,  # Parallel processing
+            )
+        except TypeError:
+            # Fallback cho sklearn < 1.2
+            bagging_estimator = BaggingClassifier(
+                base_estimator=DecisionTreeClassifier(
+                    max_depth=10,
+                    random_state=42,
+                    class_weight="balanced",
+                ),
+                n_estimators=30,  # Giảm số base estimators để tăng tốc
+                random_state=42,
+                n_jobs=-1,
+            )
+        estimators.append(("bagging", bagging_estimator))
+        
+        # 10. Random Forest với cấu hình khác (nhiều trees hơn, depth giới hạn)
+        estimators.append(
+            (
+                "rf_deep",
+                RandomForestClassifier(
+                    n_estimators=80,  # Giảm số trees để tăng tốc
+                    max_depth=20,  # Giới hạn depth
+                    min_samples_split=5,  # Minimum samples để split
+                    n_jobs=-1,
+                    random_state=42,
+                    class_weight="balanced_subsample",
+                ),
+            )
+        )
         
         # Kiểm tra có ít nhất 2 models để ensemble
         if len(estimators) < 2:
             raise ValueError(
                 "Cần ít nhất 2 models để ensemble. "
-                "Hãy cài đặt XGBoost và/hoặc LightGBM: pip install xgboost lightgbm"
+                "Hiện tại chỉ có %d models." % len(estimators)
             )
         
         # VotingClassifier: Kết hợp các models bằng voting

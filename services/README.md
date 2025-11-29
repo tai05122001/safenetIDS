@@ -57,7 +57,7 @@ Network Data → raw_network_events → Data Preprocessing → preprocessed_even
   - Tạo label_group
 
 ### 3. Level 1 Prediction Service (`level1_prediction_service.py`)
-**Chức năng**: Phân loại nhóm attack tổng quát (benign/dos/ddos/bot/rare_attack)
+**Chức năng**: Phân loại nhóm attack tổng quát (benign/dos/ddos/portscan)
 - **Input**: `preprocessed_events`
 - **Output**: `level1_predictions`
 - **Model**: `artifacts/ids_pipeline.joblib`
@@ -71,7 +71,7 @@ Network Data → raw_network_events → Data Preprocessing → preprocessed_even
   - Gửi kết quả kèm thông tin model
 
 ### 4. Level 2 Prediction Service (`level2_prediction_service.py`)
-**Chức năng**: Phân loại chi tiết cho các attack phức tạp (dos, rare_attack)
+**Chức năng**: Phân loại chi tiết cho nhóm DoS (dos)
 - **Input**: `level1_predictions`
 - **Output**: `level2_predictions`
 - **Models**: `artifacts_level2/{group}/{group}_pipeline.joblib`
@@ -80,9 +80,9 @@ Network Data → raw_network_events → Data Preprocessing → preprocessed_even
   python services/level2_prediction_service.py
   ```
 - **Tính năng**:
-  - Chỉ chạy Level 2 khi Level 1 detect dos/rare_attack
-  - Load models tương ứng theo group
-  - Mapping prediction sang attack types cụ thể
+  - Chỉ chạy Level 2 khi Level 1 detect dos
+  - Load model tương ứng theo group
+  - Mapping prediction sang attack types cụ thể (DoS Hulk, DoS GoldenEye, DoS slowloris, DoS Slowhttptest)
 
 ### 5. Alerting Service (`alerting_service.py`)
 **Chức năng**: Tạo và quản lý alerts từ predictions
@@ -186,8 +186,7 @@ alert_thresholds = {
     'benign': 0.0,      # Không tạo alert
     'dos': 0.7,         # 70% confidence
     'ddos': 0.6,        # 60% confidence
-    'bot': 0.75,        # 75% confidence
-    'rare_attack': 0.8, # 80% confidence
+    'portscan': 0.65,   # 65% confidence
     'default': 0.7      # Mặc định 70%
 }
 ```

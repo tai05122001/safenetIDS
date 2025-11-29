@@ -1,19 +1,19 @@
 """
-Đánh giá mô hình IDS level 1 trên tập test và trực quan hóa kết quả.
+Đánh giá mô hình IDS level 1 (Binary Classification: benign vs attack) trên tập test và trực quan hóa kết quả.
 
 Các bước:
 1. Load pipeline đã huấn luyện (joblib).
 2. Đọc dữ liệu test đã split.
 3. Dự đoán nhãn, tính các metric (accuracy, precision/recall/F1, conf matrix).
-4. Vẽ biểu đồ trực quan (Confusion Matrix, ROC macro nếu có) và lưu ra file.
+4. Vẽ biểu đồ trực quan (Confusion Matrix, ROC curve) và lưu ra file.
 5. Xuất thêm bảng metric theo nhãn, biểu đồ so sánh và lưu CSV.
 
 Ví dụ chạy:
 python ids_pipeline/evaluate_level1.py \
     --splits-dir dataset/splits/level1 \
-    --model-path artifacts/ids_pipeline.joblib \
-    --label-column label_group_encoded \
-    --drop-columns label_group label \
+    --model-path artifacts_rf/ids_pipeline_rf.joblib \
+    --label-column label_binary_encoded \
+    --drop-columns label_group label label_group_encoded label_attack_type_encoded \
     --output-dir reports/level1_eval
 """
 from __future__ import annotations
@@ -30,6 +30,7 @@ import numpy as np
 import pandas as pd
 from sklearn.metrics import (
     ConfusionMatrixDisplay,
+    RocCurveDisplay,
     accuracy_score,
     classification_report,
     precision_recall_fscore_support,
@@ -48,20 +49,20 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--model-path",
         type=Path,
-        default=Path("artifacts/ids_pipeline.joblib"),
-        help="Đường dẫn pipeline đã huấn luyện (mặc định: artifacts/ids_pipeline.joblib).",
+        default=Path("artifacts_rf/ids_pipeline_rf.joblib"),
+        help="Đường dẫn pipeline đã huấn luyện (mặc định: artifacts_rf/ids_pipeline_rf.joblib).",
     )
     parser.add_argument(
         "--label-column",
         type=str,
-        default="label_group_encoded",
-        help="Tên cột nhãn (mặc định: label_group_encoded).",
+        default="label_binary_encoded",
+        help="Tên cột nhãn binary (mặc định: label_binary_encoded).",
     )
     parser.add_argument(
         "--drop-columns",
         nargs="*",
-        default=["label_group", "label"],
-        help="Các cột bỏ trước khi predict (mặc định: label_group, label).",
+        default=["label_group", "label", "label_group_encoded", "label_attack_type_encoded"],
+        help="Các cột bỏ trước khi predict (mặc định: label_group, label, label_group_encoded, label_attack_type_encoded).",
     )
     parser.add_argument(
         "--output-dir",
@@ -72,8 +73,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--class-names",
         nargs="*",
-        default=["benign", "dos", "rare_attack", "ddos", "bot"],
-        help="Tên hiển thị cho từng class theo thứ tự mã hoá (mặc định: benign dos rare_attack ddos bot).",
+        default=["benign", "attack"],
+        help="Tên hiển thị cho từng class theo thứ tự mã hoá (mặc định: benign attack).",
     )
     return parser.parse_args()
 
@@ -188,8 +189,23 @@ def main() -> None:
     if hasattr(pipeline, "predict_proba"):
         try:
             y_proba = pipeline.predict_proba(X_test)
-            roc_auc = roc_auc_score(y_test, y_proba, multi_class="ovr")
-            logging.info("Macro ROC-AUC: %.6f", roc_auc)
+            # Binary classification: dùng class 1 (attack) cho ROC
+            if y_proba.shape[1] == 2:
+                roc_auc = roc_auc_score(y_test, y_proba[:, 1])
+                # Vẽ ROC curve cho binary classification
+                roc_display = RocCurveDisplay.from_predictions(
+                    y_test, y_proba[:, 1], name="Level 1 (Binary)"
+                )
+                roc_display.ax_.set_title("ROC Curve - Level 1 (Binary Classification)")
+                roc_curve_path = output_dir / "roc_curve.png"
+                roc_display.figure_.savefig(roc_curve_path, dpi=150)
+                plt.close(roc_display.figure_)
+                logging.info("ROC-AUC: %.6f", roc_auc)
+                logging.info("Đã lưu ROC curve tại %s", roc_curve_path)
+            else:
+                # Multi-class: dùng macro average
+                roc_auc = roc_auc_score(y_test, y_proba, multi_class="ovr")
+                logging.info("Macro ROC-AUC: %.6f", roc_auc)
         except Exception as exc:
             logging.warning("Không tính được ROC-AUC: %s", exc)
 
@@ -212,9 +228,18 @@ def main() -> None:
     }
     (output_dir / "metrics.json").write_text(json.dumps(make_json_safe(summary), indent=2), encoding="utf-8")
 
+    logging.info("=" * 80)
+    logging.info("📊 KẾT QUẢ ĐÁNH GIÁ LEVEL 1 (Binary Classification)")
+    logging.info("=" * 80)
+    logging.info("Accuracy: %.4f", accuracy)
+    if roc_auc is not None:
+        logging.info("ROC-AUC: %.4f", roc_auc)
+    logging.info("=" * 80)
     logging.info("Đã lưu metrics tại %s", output_dir / "metrics.json")
     logging.info("Đã lưu hình confusion_matrix.png tại %s", output_dir)
     logging.info("Đã lưu hình prf_per_class.png tại %s", output_dir)
+    if roc_curve_path:
+        logging.info("Đã lưu hình roc_curve.png tại %s", output_dir)
     logging.info("Đã lưu csv per_class_metrics.csv tại %s", output_dir)
 
 

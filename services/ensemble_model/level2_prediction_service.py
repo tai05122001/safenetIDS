@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
 """
 Safenet IDS - Level 2 Prediction Service
-Đọc từ topic level1_predictions, chạy model Level 2 cho các nhóm dos/rare_attack,
+Đọc từ topic level1_predictions, chạy model Level 2 cho nhóm dos,
 gửi đến topic level2_predictions
+
+Đã bỏ rare_attack khỏi dataset, chỉ còn nhóm dos cần Level 2 prediction.
 """
 
 import json
@@ -26,7 +28,7 @@ logging.basicConfig(
 logger = logging.getLogger('Level2Prediction')
 
 class Level2PredictionService:
-    """Service chạy prediction Level 2 cho các nhóm dos và rare_attack"""
+    """Service chạy prediction Level 2 cho nhóm dos (đã bỏ rare_attack)"""
 
     def __init__(self,
                  kafka_bootstrap_servers='localhost:9092',
@@ -55,7 +57,17 @@ class Level2PredictionService:
         self.level2_metadata = {}
 
         # Các nhóm cần Level 2 prediction
-        self.level2_groups = ['dos', 'rare_attack']
+        # Đã bỏ rare_attack khỏi dataset, chỉ còn dos
+        self.level2_groups = ['dos']
+        
+        # Summary statistics
+        self.prediction_count = 0
+        self.prediction_summary = {
+            'dos': {'total': 0, 'labels': {}}
+        }
+        self.confidence_summary = {
+            'dos': []
+        }
 
         # Khởi tạo Kafka clients và load models
         self._init_consumer()
@@ -158,11 +170,11 @@ class Level2PredictionService:
 
     def predict_level2_single_record(self, level1_result: Dict[str, Any], group: str) -> Dict[str, Any]:
         """
-        Chạy prediction Level 2 cho nhóm attack cụ thể (dos hoặc rare_attack)
+        Chạy prediction Level 2 cho nhóm attack cụ thể (dos)
 
         Process chi tiết:
         1. Model Selection:
-           - Chọn model tương ứng với group (dos/rare_attack)
+           - Chọn model tương ứng với group (dos)
            - Validate model đã được load
 
         2. Feature Extraction:
@@ -182,7 +194,7 @@ class Level2PredictionService:
 
         Args:
             level1_result (Dict[str, Any]): Kết quả từ Level 1 prediction
-            group (str): Nhóm attack cần detailed classification ('dos' hoặc 'rare_attack')
+            group (str): Nhóm attack cần detailed classification ('dos')
 
         Returns:
             Dict[str, Any]: Structured Level 2 prediction result
@@ -222,27 +234,14 @@ class Level2PredictionService:
             # Mapping prediction sang label cụ thể theo group
             # Trong thực tế, cần mapping dựa trên metadata của model Level 2
             if group == 'dos':
-                # Ví dụ mapping cho DoS attacks
+                # Đã bỏ Heartbleed khỏi dataset
                 dos_labels = {
                     0: 'DoS Hulk',
                     1: 'DoS GoldenEye',
                     2: 'DoS slowloris',
-                    3: 'DoS Slowhttptest',
-                    4: 'Heartbleed'
+                    3: 'DoS Slowhttptest'
                 }
                 prediction_label = dos_labels.get(int(prediction_encoded), f'DoS_unknown_{prediction_encoded}')
-            elif group == 'rare_attack':
-                # Ví dụ mapping cho rare attacks
-                rare_labels = {
-                    0: 'Web Attack',
-                    1: 'Brute Force',
-                    2: 'XSS',
-                    3: 'SQL Injection',
-                    4: 'Infiltration',
-                    5: 'FTP-Patator',
-                    6: 'SSH-Patator'
-                }
-                prediction_label = rare_labels.get(int(prediction_encoded), f'Rare_unknown_{prediction_encoded}')
             else:
                 prediction_label = f'{group}_unknown_{prediction_encoded}'
 
@@ -323,10 +322,17 @@ class Level2PredictionService:
                 # Chạy Level 2 prediction
                 level2_result = self.predict_level2_single_record(level1_result, group_to_predict)
 
+                # Cập nhật summary statistics
+                self._update_summary(level2_result, group_to_predict)
+
                 # Gửi kết quả Level 2
                 self.send_level2_result(level2_result, original_key)
+                
+                # Log summary mỗi 10 predictions
+                if self.prediction_count % 10 == 0:
+                    self._log_summary()
             else:
-                # Level 1 đã xác định benign, ddos, hoặc bot - không cần Level 2
+                # Level 1 đã xác định benign, ddos, hoặc portscan - không cần Level 2
                 level1_prediction = level1_result.get('prediction', {})
                 label = level1_prediction.get('label', '')
 
@@ -370,9 +376,57 @@ class Level2PredictionService:
         finally:
             self.stop()
 
+    def _update_summary(self, level2_result: Dict[str, Any], group: str):
+        """Cập nhật summary statistics"""
+        self.prediction_count += 1
+        
+        if group in self.prediction_summary:
+            self.prediction_summary[group]['total'] += 1
+            
+            level2_pred = level2_result.get('level2_prediction', {})
+            label = level2_pred.get('label', 'unknown')
+            confidence = level2_pred.get('confidence', 0.0)
+            
+            if label not in self.prediction_summary[group]['labels']:
+                self.prediction_summary[group]['labels'][label] = 0
+            self.prediction_summary[group]['labels'][label] += 1
+            
+            if confidence > 0:
+                self.confidence_summary[group].append(confidence)
+    
+    def _log_summary(self):
+        """Log summary statistics"""
+        logger.info("=" * 60)
+        logger.info("LEVEL 2 PREDICTION SUMMARY:")
+        logger.info("=" * 60)
+        logger.info(f"Total Level 2 predictions: {self.prediction_count}")
+        logger.info("")
+        
+        for group in self.level2_groups:
+            if group in self.prediction_summary and self.prediction_summary[group]['total'] > 0:
+                total = self.prediction_summary[group]['total']
+                avg_conf = 0.0
+                if len(self.confidence_summary[group]) > 0:
+                    avg_conf = sum(self.confidence_summary[group]) / len(self.confidence_summary[group])
+                
+                logger.info(f"Group '{group}': {total} predictions - Avg confidence: {avg_conf:.3f}")
+                logger.info(f"  Detailed classification:")
+                for label, count in sorted(self.prediction_summary[group]['labels'].items(), 
+                                          key=lambda x: x[1], reverse=True):
+                    percentage = (count / total) * 100
+                    logger.info(f"    - {label}: {count} ({percentage:.1f}%)")
+        
+        logger.info("=" * 60)
+    
     def stop(self):
         """Dừng service"""
         self.is_running = False
+        
+        # Log final summary
+        if self.prediction_count > 0:
+            logger.info("")
+            self._log_summary()
+        
         if self.consumer:
             self.consumer.close()
         if self.producer:
