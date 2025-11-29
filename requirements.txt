@@ -12,3 +12,7 @@ seaborn>=0.13
 # Nếu chỉ dùng random_forest thì có thể bỏ qua
 xgboost>=2.0.0  # XGBoost - gradient boosting mạnh mẽ
 lightgbm>=4.0.0  # LightGBM - gradient boosting nhanh và hiệu quả
+
+# Packet Capture và Network Analysis
+pyshark>=0.6  # Python wrapper cho tshark/Wireshark - BẮT BUỘC cho packet_capture_service.py
+scapy>=2.5.0  # Network packet manipulation - TÙY CHỌN (cho CICFlowMeter real-time mode)

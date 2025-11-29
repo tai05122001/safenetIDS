@@ -36,3 +36,7 @@ dataset.csv
 Thumbs.db
 *.DS_Store
 
+# External tools (CICFlowMeter - too large for git)
+tools/CICFlowMeter/
+tools/*.jar
+
