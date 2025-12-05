@@ -2,231 +2,348 @@
 
 ## 1. Tổng quan
 
-Hệ thống gồm **6 module chính**, tương ứng pipeline chi tiết:
+Hệ thống Safenet IDS là một hệ thống phát hiện xâm nhập đa cấp sử dụng kiến trúc microservices với Apache Kafka, bao gồm **8 module chính**:
 
-1.  **Network Traffic Collection Module**
-2.  **Flow Generation (Zeek/Bro)**
-3.  **Preprocessing Module (Data Cleaning & Encoding)**
-4.  **Feature Extraction Module (CICFlowMeter / Custom Extractor)**
-5.  **ML Model Module (Training & Inference)**
-6.  **Alerting & Visualization Module (Kafka + Dashboard)**
+1.  **Network Traffic Collection Module** (Packet Capture Service)
+2.  **Data Preprocessing Module** (Kafka-based Service)
+3.  **Level 1 Prediction Module** (Random Forest - Phân loại nhóm tấn công)
+4.  **Level 2 Prediction Module** (Random Forest - Phân loại chi tiết loại tấn công)
+5.  **Level 3 Prediction Module** (Random Forest - Phân loại DoS variants)
+6.  **Alerting Module** (Kafka + SQLite Database)
+7.  **Attack Simulation Module** (Giả lập tấn công để test)
+8.  **Visualization & Monitoring Module** (Dashboard + Logging)
 
-> *Hình 1: Pipeline Intrusion Detection System*
+**Kiến trúc tổng thể:**
+```
+Packet Capture → Kafka → Data Preprocessing → Level 1 Prediction → Level 2 Prediction → Level 3 Prediction → Alerting → Database
+```
+
+**Công nghệ sử dụng:**
+- **Packet Capture**: pyshark, scapy
+- **Message Queue**: Apache Kafka
+- **Machine Learning**: scikit-learn, Random Forest
+- **Database**: SQLite
+- **Visualization**: Streamlit (tương lai)
+
+> *Hình 1: Pipeline Safenet IDS với Kafka Microservices*
 
 ------------------------------------------------------------------------
 
 ## 2. Network Traffic Collection Module
 
 **Mục tiêu:**\
-Thu thập dữ liệu mạng để làm đầu vào cho hệ thống.
+Thu thập dữ liệu mạng real-time hoặc từ file để làm đầu vào cho hệ thống phát hiện xâm nhập.
 
 **Giải thích:**\
-Giống như việc "ghi lại" mọi gói tin đi qua mạng, giúp hệ thống có dữ
-liệu để phát hiện hành vi bất thường.
+Module này thu thập các gói tin mạng và chuyển đổi thành dữ liệu có cấu trúc để xử lý tiếp theo trong pipeline Kafka.
 
 **Cách triển khai:**
 
--   **Offline:**\
-    Dùng sẵn dữ liệu mẫu có sẵn (ví dụ bộ *CICIDS2017*). Dữ liệu này gồm
-    nhiều dạng tấn công thật (DDoS, Botnet, PortScan, v.v.).
+-   **Real-time Capture:**\
+    Sử dụng `services/packet_capture_service.py` với pyshark để capture gói tin từ network interface.
 
--   **Online:**\
-    Nếu có thiết bị mạng thật, có thể dùng công cụ **Zeek** hoặc
-    **Wireshark** để "nghe" trực tiếp các gói tin đang truyền qua.
+-   **File-based Input:**\
+    Sử dụng `services/network_data_producer.py` để đọc dữ liệu từ file CSV/PCAP có sẵn (như CICIDS2017).
+
+-   **Simulation Mode:**\
+    Sử dụng `services/simulate_attack_service.py` để tạo dữ liệu tấn công giả lập phục vụ testing.
+
+**Công nghệ sử dụng:**
+- **pyshark**: Python wrapper cho Wireshark/tshark
+- **scapy**: Network packet manipulation (tùy chọn)
+- **Kafka Producer**: Gửi dữ liệu đến topic `raw_network_events`
 
 **Kết quả:**\
-Sinh ra các tệp dữ liệu dạng `.pcap` hoặc `log`, chứa thông tin kết nối
-giữa các máy (ai nói chuyện với ai, bao nhiêu byte, giao thức gì,...).
+Dữ liệu được gửi đến Kafka topic `raw_network_events` dưới dạng JSON messages, sẵn sàng cho module preprocessing.
 
 ------------------------------------------------------------------------
 
-## 3. Flow Generation (Zeek/Bro)
+## 3. Data Preprocessing Module
 
 **Mục tiêu:**\
-Biến dữ liệu mạng thô thành dạng có cấu trúc -- dễ phân tích bằng máy
-học.
+Làm sạch và chuẩn hóa dữ liệu mạng từ Kafka để chuẩn bị cho việc prediction.
 
 **Giải thích:**\
-Thay vì xem từng gói tin (rất nhiều và rời rạc), ta gom các gói tin
-thành một "luồng" (flow) -- tức là một cuộc trao đổi hoàn chỉnh giữa hai
-máy (ví dụ: A gửi dữ liệu đến B trong 5 giây).
+Module này nhận dữ liệu thô từ Kafka topic `raw_network_events`, thực hiện các bước preprocessing và gửi kết quả đến topic `preprocessed_events`.
 
 **Cách triển khai:**
+Sử dụng `services/data_preprocessing_service.py` với các tính năng:
 
--   Dùng phần mềm **Zeek (trước đây là Bro)** để đọc file `.pcap` và tạo
-    ra file log chi tiết (ví dụ: `conn.log`, `http.log`, `dns.log`,
-    ...).
--   Mỗi dòng log biểu diễn một kết nối (flow) với các thông tin cơ bản:
-    -   Địa chỉ IP nguồn & đích\
-    -   Thời lượng kết nối\
-    -   Số lượng byte và gói tin gửi đi -- nhận về\
-    -   Giao thức (TCP, UDP, HTTP, ...)
+-   **Kafka Consumer/Producer:** Đọc từ `raw_network_events`, ghi ra `preprocessed_events`
+-   **Data Cleaning:**
+    -   Chuẩn hóa tên cột
+    -   Xử lý missing values (fill bằng 0 hoặc mean)
+    -   Loại bỏ outliers bằng IQR method
+-   **Feature Engineering:**
+    -   Standard scaling cho các đặc trưng numeric
+    -   Tạo label_group cho classification
+-   **Error Handling:** Retry mechanism và logging chi tiết
+
+**Công nghệ sử dụng:**
+- **pandas/numpy**: Data manipulation
+- **scikit-learn**: Scaling và preprocessing
+- **Kafka**: Message passing
 
 **Kết quả:**\
-File log ở dạng CSV -- mỗi dòng là một flow, sẽ được xử lý ở bước kế
-tiếp.
+Dữ liệu đã được làm sạch và chuẩn hóa, sẵn sàng cho các module prediction tiếp theo.
 
 ------------------------------------------------------------------------
 
-## 4. Preprocessing Module (Data Cleaning & Encoding)
+## 4. Level 1 Prediction Module (Binary Classification)
 
 **Mục tiêu:**\
-Làm sạch dữ liệu, chuyển về dạng mà mô hình có thể hiểu và học được.
+Phân loại traffic là bình thường hay có dấu hiệu tấn công.
 
 **Giải thích:**\
-Dữ liệu gốc có thể chứa lỗi, giá trị trống, hoặc ký hiệu chữ (ví dụ
-"TCP", "UDP"), mà mô hình chỉ hiểu số.\
-Ta cần chuẩn hóa và mã hóa dữ liệu này.
+Đây là cấp độ đầu tiên của hệ thống 3-level prediction, sử dụng Random Forest để phân loại cơ bản giữa traffic benign và malicious.
 
 **Cách triển khai:**
+Sử dụng `services/random_forest/level1_prediction_service_rf.py`:
 
--   Loại bỏ dòng lỗi hoặc trống\
--   Thay thế giá trị trống bằng số 0 hoặc trung bình\
--   Biến đổi ký hiệu chữ thành số (VD: `TCP → 1`, `UDP → 2`)\
--   Chuẩn hóa dữ liệu về cùng thang đo (để các đặc trưng như "số byte"
-    hay "thời lượng" không chênh lệch quá lớn)
+-   **Kafka Integration:** Consumer `preprocessed_events` → Producer `level1_predictions`
+-   **Model:** Random Forest đã được train từ `ids_pipeline/train_level1_rf.py`
+-   **Classification:** Phân loại thành các nhóm: benign, dos, ddos, portscan
+-   **Output:** Prediction kết quả kèm confidence score
+
+**Model Training:**
+```bash
+python ids_pipeline/train_level1_rf.py
+```
 
 **Kết quả:**\
-Một bảng dữ liệu sạch, toàn số -- sẵn sàng để mô hình học.
+Traffic được gắn nhãn cấp độ 1, tiếp tục được xử lý bởi Level 2 nếu phát hiện tấn công.
 
 ------------------------------------------------------------------------
 
-## 5. Feature Extraction Module (CICFlowMeter / Custom Extractor)
+## 5. Level 2 Prediction Module (Attack Type Classification)
 
 **Mục tiêu:**\
-Tạo ra các đặc trưng (feature) giúp mô hình phân biệt bình thường và bất
-thường.
+Phân loại chi tiết loại tấn công dựa trên kết quả từ Level 1.
 
 **Giải thích:**\
-Các "feature" giống như các đặc điểm của một hành vi mạng. Ví dụ:
-
--   Một người gửi hàng nghìn yêu cầu trong 1 giây → có thể là tấn công
-    DDoS.\
--   Một IP kết nối với hàng trăm địa chỉ khác → có thể là Botnet.
+Khi Level 1 phát hiện traffic là malicious, Level 2 sẽ phân loại chi tiết hơn về loại tấn công cụ thể.
 
 **Cách triển khai:**
+Sử dụng `services/random_forest/level2_prediction_service_rf.py`:
 
--   Dùng công cụ **CICFlowMeter** hoặc **script Python** để tạo ra các
-    đặc trưng như:
-    -   Thời lượng kết nối\
-    -   Số gói tin gửi/nhận\
-    -   Tổng byte gửi/nhận\
-    -   Độ trễ giữa các gói tin\
-    -   Tỷ lệ byte chiều đi / chiều về\
--   Có thể lọc giữ lại các đặc trưng quan trọng nhất để mô hình học hiệu
-    quả hơn.
+-   **Conditional Processing:** Chỉ kích hoạt khi Level 1 detect malicious traffic
+-   **Kafka Integration:** Consumer `level1_predictions` → Producer `level2_predictions`
+-   **Models:** Nhiều model Random Forest cho từng loại tấn công (DoS, DDoS, PortScan)
+-   **Attack Types:** DoS Hulk, DoS GoldenEye, DoS Slowloris, DoS Slowhttptest, v.v.
+
+**Model Training:**
+```bash
+python ids_pipeline/train_level2_attack_types_rf.py
+# hoặc
+python ids_pipeline/train_level2_rf.py
+```
 
 **Kết quả:**\
-Một bảng dữ liệu (nhiều cột -- mỗi cột là 1 đặc trưng), dùng làm đầu vào
-huấn luyện mô hình.
+Traffic malicious được phân loại chi tiết về loại tấn công, chuyển tiếp cho Level 3 nếu cần.
 
 ------------------------------------------------------------------------
 
-## 6. ML Model Module (Training & Inference)
+## 6. Level 3 Prediction Module (DoS Attack Variants)
 
 **Mục tiêu:**\
-Dạy máy tính phát hiện hành vi bất thường trong mạng.
+Phân loại chi tiết các biến thể tấn công DoS.
 
 **Giải thích:**\
-Máy tính sẽ "học" từ dữ liệu mạng bình thường và tấn công, sau đó có thể
-tự nhận ra khi có hành vi khác thường.
+Khi Level 2 xác định là tấn công DoS, Level 3 sẽ phân loại sâu hơn về các biến thể cụ thể của DoS attacks.
 
 **Cách triển khai:**
+Sử dụng `services/random_forest/level3_prediction_service_rf.py`:
 
-### Khi **không có nhãn (unsupervised)**:
+-   **Conditional Processing:** Chỉ kích hoạt khi Level 2 detect DoS attacks
+-   **Kafka Integration:** Consumer `level2_predictions` → Producer `level3_predictions`
+-   **Model:** Random Forest chuyên biệt cho DoS classification
+-   **DoS Variants:** Hulk, GoldenEye, Slowloris, Slowhttptest, v.v.
 
--   Dùng mô hình như **Isolation Forest** hoặc **VAE (Variational
-    Autoencoder)** để phát hiện các dòng dữ liệu khác biệt với phần lớn
-    còn lại.
-
-### Khi **có nhãn (supervised)**:
-
--   Dùng mô hình như **Random Forest**, **XGBoost**, hoặc **MLP** để
-    phân loại theo loại tấn công.
-
-**Đánh giá kết quả:** - Dùng các chỉ số như: - Precision\
-- Recall\
-- F1-score\
-- False Positive Rate (tỷ lệ cảnh báo sai)
+**Model Training:**
+```bash
+python ids_pipeline/train_level3_dos_rf.py
+```
 
 **Kết quả:**\
-Một mô hình được huấn luyện sẵn, có thể đọc luồng dữ liệu mới và gắn
-nhãn "bình thường" hoặc "bị tấn công".
+Tấn công DoS được phân loại chi tiết về biến thể cụ thể.
 
 ------------------------------------------------------------------------
 
-## 7. Alerting & Visualization Module (Kafka + Dashboard)
+## 7. Alerting Module (Kafka + SQLite Database)
 
 **Mục tiêu:**\
-Hiển thị cảnh báo và lưu kết quả phát hiện bất thường.
+Tạo và quản lý cảnh báo bảo mật từ kết quả prediction.
 
 **Giải thích:**\
-Khi mô hình phát hiện điều bất thường, hệ thống cần hiển thị ngay cho
-người quản trị mạng hoặc lưu vào file log.
+Module này nhận kết quả từ Level 3 predictions, tạo alerts dựa trên confidence thresholds và lưu vào database.
 
 **Cách triển khai:**
+Sử dụng `services/alerting_service.py`:
 
--   Dùng **Kafka** để truyền dữ liệu thời gian thực từ mô hình đến bảng
-    điều khiển (Dashboard).
--   **Dashboard** (làm bằng *Streamlit* hoặc *Flask*) hiển thị thông tin
-    như:
-    -   Địa chỉ IP bị nghi ngờ\
-    -   Loại tấn công\
-    -   Thời điểm xảy ra\
-    -   Mức độ nghiêm trọng\
--   Có thể xuất báo cáo định kỳ hoặc lưu vào cơ sở dữ liệu để phân tích
-    sau.
+-   **Kafka Integration:** Consumer `level3_predictions` → Producer `ids_alerts`
+-   **Alert Generation:**
+    -   Threshold-based: Chỉ tạo alert khi confidence > ngưỡng
+    -   Severity Classification: low/medium/high/critical
+    -   Alert Types: DoS, DDoS, PortScan, etc.
+-   **Database Storage:** SQLite database tại `services/data/alerts.db`
+-   **Alert Schema:** timestamp, source_ip, attack_type, confidence, severity
+
+**Alert Thresholds:**
+```python
+alert_thresholds = {
+    'benign': 0.0,      # Không tạo alert
+    'dos': 0.7,         # 70% confidence
+    'ddos': 0.6,        # 60% confidence
+    'portscan': 0.65,   # 65% confidence
+}
+```
 
 **Kết quả:**\
-Một giao diện trực quan giúp quản trị viên xem cảnh báo và tra cứu chi
-tiết từng sự cố.
+Cảnh báo được lưu trữ và có thể truy vấn để monitoring và response.
 
 ------------------------------------------------------------------------
 
-## 8. Checklist triển khai **offline**
+## 8. Attack Simulation Module
 
 **Mục tiêu:**\
-Đảm bảo có thể tái lập toàn bộ pipeline IDS với dữ liệu mẫu (không cần mạng thật).
+Giả lập các cuộc tấn công mạng để kiểm thử và đánh giá hệ thống IDS.
+
+**Giải thích:**\
+Module này tạo ra traffic tấn công giả lập để test toàn bộ pipeline từ capture đến alerting.
+
+**Cách triển khai:**
+Sử dụng `services/simulate_attack_service.py`:
+
+-   **Attack Types:** DoS, DDoS, PortScan, Brute Force
+-   **Traffic Generation:** Tạo packets với các pattern tấn công thực tế
+-   **Integration:** Gửi dữ liệu trực tiếp vào pipeline (bỏ qua packet capture)
+-   **Testing Scenarios:** Load testing, accuracy validation
+
+**Cách sử dụng:**
+```bash
+python services/simulate_attack_service.py --attack-type dos --duration 60
+```
+
+**Kết quả:**\
+Dữ liệu tấn công giả lập để validate hệ thống phát hiện.
+
+------------------------------------------------------------------------
+
+## 9. Visualization & Monitoring Module
+
+**Mục tiêu:**\
+Cung cấp giao diện giám sát và báo cáo cho hệ thống IDS.
+
+**Giải thích:**\
+Module này hiển thị alerts, metrics và logs của hệ thống trong thời gian thực.
+
+**Cách triển khai (tương lai):**
+-   **Dashboard:** Streamlit web interface
+-   **Real-time Monitoring:** Kafka consumer để hiển thị alerts
+-   **Historical Reports:** Query từ SQLite database
+-   **Metrics Visualization:** Charts cho accuracy, throughput, false positives
+
+**Tính năng dự kiến:**
+-   Live alerts feed
+-   Attack statistics
+-   System performance metrics
+-   Log viewer
+-   Alert management interface
+
+------------------------------------------------------------------------
+
+## 10. Checklist triển khai **offline**
+
+**Mục tiêu:**\
+Triển khai hoàn chỉnh hệ thống IDS với dữ liệu mẫu, bao gồm training pipeline và inference services.
 
 **Bước thực hiện:**
 
--   **Chuẩn bị dữ liệu gốc**
-    -   Tải bộ dữ liệu `.pcap` hoặc `.csv` (ví dụ `CICIDS2017`) và đặt tại `data/raw/`.
-    -   (Tuỳ chọn) Dùng Zeek để chuyển `.pcap` → `.log`/`.csv` nếu cần chuẩn hóa cấu trúc.
+### 1. Chuẩn bị môi trường
+```bash
+# Cài đặt dependencies
+pip install -r requirements.txt
 
--   **Tiền xử lý & trích đặc trưng**
-    -   Sử dụng script `scripts/preprocess_dataset.py` với các tuỳ chọn mới để làm sạch, loại bỏ dòng/cột lỗi, one-hot encoding và chuẩn hóa số liệu.
-    -   Ví dụ:
+# Setup Kafka (nếu chưa có)
+# Download và cài đặt Kafka từ kafka.apache.org
+# Chạy Zookeeper và Kafka server
+```
 
-        ```
-        python scripts/preprocess_dataset.py \
-          --source data/raw/cicids2017.csv \
-          --output data/processed/cicids2017_clean.pkl \
-          --output-csv data/processed/cicids2017_clean.csv \
-          --metadata-output artifacts/cicids2017_preprocess.json \
-          --drop-duplicates \
-          --drop-constant-columns \
-          --min-non-null-ratio 0.6 \
-          --outlier-method iqr_clip \
-          --iqr-factor 1.5 \
-          --scale-method standard \
-          --one-hot \
-          --summary
-        ```
+### 2. Chuẩn bị dữ liệu training
+```bash
+# Download CICIDS2017 dataset và đặt vào thư mục phù hợp
+# Sử dụng extract_samples.py để trích xuất samples nếu cần
 
-    -   File `artifacts/cicids2017_preprocess.json` lưu metadata (mapping nhãn, cột đã loại bỏ, thống kê scaling) phục vụ bước huấn luyện/inference sau này.
+# Load và kiểm tra dataset
+python scripts/load_dataset.py
 
--   **Huấn luyện mô hình**
-    -   Dùng dữ liệu từ `data/processed/` để huấn luyện mô hình ML đã chọn.
-    -   Lưu checkpoint (`.pkl`, `.onnx`, ...) cùng cấu hình huấn luyện để tái sử dụng.
+# Preprocess dataset
+python scripts/preprocess_dataset.py
 
--   **Đánh giá & báo cáo**
-    -   Sinh các chỉ số: Precision, Recall, F1, False Positive Rate.
-    -   Ghi nhận ma trận nhầm lẫn, biểu đồ ROC/PR và lưu vào thư mục `reports/`.
+# Chia tập train/test
+python scripts/split_dataset.py
+```
 
--   **Tài liệu vận hành**
-    -   Ghi lại toàn bộ lệnh chạy, yêu cầu môi trường (phiên bản Python/thư viện), cấu trúc thư mục dữ liệu.
-    -   Bổ sung kết quả chạy thử (log, báo cáo) để người tích hợp có thể kiểm chứng nhanh.
+### 3. Training Models (3 Level Pipeline)
+```bash
+# Level 1: Binary classification (benign vs attack groups)
+python ids_pipeline/train_level1_rf.py
+
+# Level 2: Attack type classification
+python ids_pipeline/train_level2_attack_types_rf.py
+
+# Level 3: DoS attack variants
+python ids_pipeline/train_level3_dos_rf.py
+```
+
+### 4. Evaluate Models
+```bash
+# Đánh giá Level 1
+python ids_pipeline/evaluate_level1.py
+
+# Đánh giá Level 2
+python ids_pipeline/evaluate_level2.py
+```
+
+### 5. Khởi động Inference Services
+```bash
+# Cách 1: Khởi động tất cả services
+cd services
+start_all_services.bat
+
+# Cách 2: Khởi động từng service
+# Terminal 1: Network Data Producer
+python services/network_data_producer.py
+
+# Terminal 2: Data Preprocessing
+python services/data_preprocessing_service.py
+
+# Terminal 3: Level 1 Prediction
+python services/random_forest/level1_prediction_service_rf.py
+
+# Terminal 4: Level 2 Prediction
+python services/random_forest/level2_prediction_service_rf.py
+
+# Terminal 5: Level 3 Prediction
+python services/random_forest/level3_prediction_service_rf.py
+
+# Terminal 6: Alerting Service
+python services/alerting_service.py
+```
+
+### 6. Test hệ thống
+```bash
+# Test với dữ liệu giả lập
+python services/simulate_attack_service.py --attack-type dos --duration 30
+
+# Kiểm tra alerts trong database
+sqlite3 services/data/alerts.db "SELECT * FROM alerts ORDER BY timestamp DESC LIMIT 5;"
+```
+
+### 7. Monitoring và Logs
+- **Kafka Topics:** Kiểm tra messages trong các topics: `raw_network_events`, `preprocessed_events`, `level1_predictions`, `level2_predictions`, `level3_predictions`, `ids_alerts`
+- **Logs:** Xem logs trong `services/logs/` để debug
+- **Database:** Query SQLite database để xem alerts
 
 **Kết quả:**\
-Một quy trình offline hoàn chỉnh, dữ liệu sạch chuẩn hoá, mô hình đã kiểm thử cùng hướng dẫn tái lập.
+Hệ thống IDS hoàn chỉnh với pipeline training và inference services, sẵn sàng phát hiện tấn công mạng thời gian thực.
