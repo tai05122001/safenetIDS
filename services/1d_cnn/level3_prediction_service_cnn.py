@@ -43,6 +43,7 @@ class Level3CNNPredictionService:
         model_path: str = "artifacts_cnn_level3\\dos_classifier_cnn_final.h5",
         scaler_path: str = "artifacts_cnn_level3\\scaler.joblib",
         label_encoder_path: str = "artifacts_cnn_level3\\label_encoder.joblib",
+        metadata_path: str = "artifacts_cnn_level3\\training_metadata.json",
         poll_timeout: int = 1000,
         max_retries: int = 3,
         confidence_threshold: float = 0.6,
@@ -62,10 +63,31 @@ class Level3CNNPredictionService:
             'dos', 'ddos', 'hulk', 'goldeneye', 'slowloris', 'slowhttptest'
         ]
 
+        # DoS variant mapping khớp với Level 3 CNN training labels
+        # label_encoder.classes_ = ["2", "3", "4", "5"] (DoS Hulk, DoS GoldenEye, DoS Slowloris, DoS Slowhttptest)
+        self.dos_variant_labels = {
+            # Integer mappings (class indices)
+            0: "DoS Hulk",           # label_encoder.classes_[0] = "2" -> DoS Hulk
+            1: "DoS GoldenEye",      # label_encoder.classes_[1] = "3" -> DoS GoldenEye
+            2: "DoS Slowloris",      # label_encoder.classes_[2] = "4" -> DoS Slowloris
+            3: "DoS Slowhttptest",   # label_encoder.classes_[3] = "5" -> DoS Slowhttptest
+            # String mappings (from label_encoder.classes_)
+            "2": "DoS Hulk",          # label_encoder.classes_[0]
+            "3": "DoS GoldenEye",     # label_encoder.classes_[1]
+            "4": "DoS Slowloris",     # label_encoder.classes_[2]
+            "5": "DoS Slowhttptest",  # label_encoder.classes_[3]
+            # Legacy mappings for backward compatibility
+            "DoS Hulk": "DoS Hulk",
+            "DoS GoldenEye": "DoS GoldenEye",
+            "DoS Slowloris": "DoS Slowloris",
+            "DoS Slowhttptest": "DoS Slowhttptest"
+        }
+
         # Model artifacts
         self.model_path = Path(model_path)
         self.scaler_path = Path(scaler_path)
         self.label_encoder_path = Path(label_encoder_path)
+        self.metadata_path = Path(metadata_path)
 
         # Components
         self.consumer: Optional[KafkaConsumer] = None
@@ -73,6 +95,10 @@ class Level3CNNPredictionService:
         self.model: Optional[tf.keras.Model] = None
         self.scaler = None
         self.label_encoder = None
+
+        # Feature columns for consistent ordering
+        self.feature_columns = None
+        self.metadata = None
 
         # Stats
         self.processed_count = 0
@@ -116,9 +142,36 @@ class Level3CNNPredictionService:
         self.logger.info(f"Received signal {signum}, shutting down gracefully...")
         self.stop()
 
+    def load_feature_columns(self) -> bool:
+        """Load feature columns từ training metadata để đảm bảo thứ tự đúng."""
+        try:
+            self.logger.info("Loading feature columns từ: %s", self.metadata_path)
+            if not self.metadata_path.exists():
+                self.logger.warning("Training metadata not found, using default feature order")
+                return False
+
+            with open(self.metadata_path, 'r', encoding='utf-8') as f:
+                self.metadata = json.load(f)
+
+            self.feature_columns = self.metadata.get('data_info', {}).get('feature_columns', [])
+            if self.feature_columns:
+                self.logger.info(f"Loaded {len(self.feature_columns)} feature columns from training metadata")
+                self.logger.info(f"First 5 features: {self.feature_columns[:5]}")
+                return True
+            else:
+                self.logger.warning("No feature columns found in metadata")
+                return False
+
+        except Exception as e:
+            self.logger.error("Failed to load feature columns: %s", str(e))
+            return False
+
     def load_model(self) -> bool:
         """Load Advanced CNN model và preprocessing artifacts."""
         try:
+            # Load feature columns first
+            self.load_feature_columns()
+
             self.logger.info("Loading Level 3 DoS CNN model từ: %s", self.model_path)
             if not self.model_path.exists():
                 raise FileNotFoundError(f"Model file not found: {self.model_path}")
@@ -128,9 +181,6 @@ class Level3CNNPredictionService:
 
             # Load scaler
             self.logger.info("Loading scaler từ: %s", self.scaler_path)
-            self.logger.info("Scaler path exists: %s", self.scaler_path.exists())
-            self.logger.info("Current working directory: %s", os.getcwd())
-            self.logger.info("Absolute scaler path: %s", self.scaler_path.absolute())
             if not self.scaler_path.exists():
                 raise FileNotFoundError(f"Scaler file not found: {self.scaler_path}")
 
@@ -234,16 +284,147 @@ class Level3CNNPredictionService:
             return False
 
     def preprocess_features(self, features: Dict[str, Any]) -> Optional[np.ndarray]:
-        """Preprocess features cho Level 3 DoS CNN model."""
+        """Preprocess features cho Level 3 DoS CNN model với đúng thứ tự từ training."""
         try:
-            # Convert features dict to array
-            feature_values = []
-            for key, value in sorted(features.items()):  # Sort để đảm bảo thứ tự
-                if isinstance(value, (int, float)):
-                    feature_values.append(float(value))
-                else:
-                    # Handle non-numeric values
-                    feature_values.append(0.0)
+            # Get mapping từ raw CICIDS2017 names sang processed names (tương tự Level 1)
+            raw_to_processed = {
+                ' Destination Port': 'destination_port',
+                ' Flow Duration': 'flow_duration',
+                ' Total Fwd Packets': 'total_fwd_packets',
+                ' Total Backward Packets': 'total_backward_packets',
+                'Total Length of Fwd Packets': 'total_length_of_fwd_packets',
+                ' Total Length of Bwd Packets': 'total_length_of_bwd_packets',
+                ' Fwd Packet Length Max': 'fwd_packet_length_max',
+                ' Fwd Packet Length Min': 'fwd_packet_length_min',
+                ' Fwd Packet Length Mean': 'fwd_packet_length_mean',
+                ' Fwd Packet Length Std': 'fwd_packet_length_std',
+                'Bwd Packet Length Max': 'bwd_packet_length_max',
+                ' Bwd Packet Length Min': 'bwd_packet_length_min',
+                ' Bwd Packet Length Mean': 'bwd_packet_length_mean',
+                ' Bwd Packet Length Std': 'bwd_packet_length_std',
+                'Flow Bytes/s': 'flow_bytes_s',
+                ' Flow Packets/s': 'flow_packets_s',
+                ' Flow IAT Mean': 'flow_iat_mean',
+                ' Flow IAT Std': 'flow_iat_std',
+                ' Flow IAT Max': 'flow_iat_max',
+                ' Flow IAT Min': 'flow_iat_min',
+                'Fwd IAT Total': 'fwd_iat_total',
+                ' Fwd IAT Mean': 'fwd_iat_mean',
+                ' Fwd IAT Std': 'fwd_iat_std',
+                ' Fwd IAT Max': 'fwd_iat_max',
+                ' Fwd IAT Min': 'fwd_iat_min',
+                'Bwd IAT Total': 'bwd_iat_total',
+                ' Bwd IAT Mean': 'bwd_iat_mean',
+                ' Bwd IAT Std': 'bwd_iat_std',
+                ' Bwd IAT Max': 'bwd_iat_max',
+                ' Bwd IAT Min': 'bwd_iat_min',
+                'Fwd PSH Flags': 'fwd_psh_flags',
+                ' Bwd PSH Flags': 'bwd_psh_flags',
+                ' Fwd URG Flags': 'fwd_urg_flags',
+                ' Bwd URG Flags': 'bwd_urg_flags',
+                ' Fwd Header Length': 'fwd_header_length',
+                ' Bwd Header Length': 'bwd_header_length',
+                'Fwd Packets/s': 'fwd_packets_s',
+                ' Bwd Packets/s': 'bwd_packets_s',
+                ' Min Packet Length': 'min_packet_length',
+                ' Max Packet Length': 'max_packet_length',
+                ' Packet Length Mean': 'packet_length_mean',
+                ' Packet Length Std': 'packet_length_std',
+                ' Packet Length Variance': 'packet_length_variance',
+                'FIN Flag Count': 'fin_flag_count',
+                ' SYN Flag Count': 'syn_flag_count',
+                ' RST Flag Count': 'rst_flag_count',
+                ' PSH Flag Count': 'psh_flag_count',
+                ' ACK Flag Count': 'ack_flag_count',
+                ' URG Flag Count': 'urg_flag_count',
+                ' CWE Flag Count': 'cwe_flag_count',
+                ' ECE Flag Count': 'ece_flag_count',
+                ' Down/Up Ratio': 'down_up_ratio',
+                ' Average Packet Size': 'average_packet_size',
+                ' Avg Fwd Segment Size': 'avg_fwd_segment_size',
+                ' Avg Bwd Segment Size': 'avg_bwd_segment_size',
+                ' Fwd Header Length.1': 'fwd_header_length_1',
+                'Fwd Avg Bytes/Bulk': 'fwd_avg_bytes_bulk',
+                ' Fwd Avg Packets/Bulk': 'fwd_avg_packets_bulk',
+                ' Fwd Avg Bulk Rate': 'fwd_avg_bulk_rate',
+                ' Bwd Avg Bytes/Bulk': 'bwd_avg_bytes_bulk',
+                ' Bwd Avg Packets/Bulk': 'bwd_avg_packets_bulk',
+                'Bwd Avg Bulk Rate': 'bwd_avg_bulk_rate',
+                'Subflow Fwd Packets': 'subflow_fwd_packets',
+                ' Subflow Fwd Bytes': 'subflow_fwd_bytes',
+                ' Subflow Bwd Packets': 'subflow_bwd_packets',
+                ' Subflow Bwd Bytes': 'subflow_bwd_bytes',
+                'Init_Win_bytes_forward': 'init_win_bytes_forward',
+                ' Init_Win_bytes_backward': 'init_win_bytes_backward',
+                ' act_data_pkt_fwd': 'act_data_pkt_fwd',
+                ' min_seg_size_forward': 'min_seg_size_forward',
+                'Active Mean': 'active_mean',
+                ' Active Std': 'active_std',
+                ' Active Max': 'active_max',
+                ' Active Min': 'active_min',
+                'Idle Mean': 'idle_mean',
+                ' Idle Std': 'idle_std',
+                ' Idle Max': 'idle_max',
+                ' Idle Min': 'idle_min'
+            }
+
+            # Convert features dict to array theo đúng thứ tự training
+            if self.feature_columns:
+                # Use feature columns from metadata for consistent ordering
+                feature_values = []
+                for feature_name in self.feature_columns:
+                    value = None
+
+                    # Try different possible column name formats
+                    possible_names = [
+                        feature_name,  # snake_case (processed)
+                        raw_to_processed.get(feature_name, feature_name)  # raw with spaces (fallback to same name if not found)
+                    ]
+
+                    # Remove duplicates
+                    possible_names = list(set(possible_names))
+
+                    # Try to find the value in data
+                    for name in possible_names:
+                        if name in features:
+                            value = features[name]
+                            break
+
+                    # Convert to float
+                    if value is not None:
+                        try:
+                            if isinstance(value, str):
+                                if value.strip() == '':
+                                    feature_values.append(0.0)
+                                else:
+                                    numeric_value = float(value)
+                                    if np.isinf(numeric_value) or np.isnan(numeric_value):
+                                        feature_values.append(0.0)
+                                    else:
+                                        feature_values.append(numeric_value)
+                            elif isinstance(value, (int, float)):
+                                if np.isinf(value) or np.isnan(value):
+                                    feature_values.append(0.0)
+                                else:
+                                    feature_values.append(float(value))
+                            else:
+                                feature_values.append(0.0)
+                        except (ValueError, TypeError):
+                            feature_values.append(0.0)
+                    else:
+                        feature_values.append(0.0)
+            else:
+                # Fallback: sort alphabetically (not recommended)
+                self.logger.warning("No feature columns loaded, using alphabetical sorting (may cause prediction errors)")
+                feature_values = []
+                for key, value in sorted(features.items()):
+                    if isinstance(value, (int, float)):
+                        if np.isinf(value) or np.isnan(value):
+                            feature_values.append(0.0)
+                        else:
+                            feature_values.append(float(value))
+                    else:
+                        feature_values.append(0.0)
 
             X = np.array([feature_values], dtype=np.float32)
 
@@ -292,11 +473,12 @@ class Level3CNNPredictionService:
             predicted_class_idx = int(np.argmax(predictions[0]))
             confidence = float(np.max(predictions[0]))
 
-            # Get DoS variant name
+            # Get DoS variant name (readable label instead of class index)
             if hasattr(self.label_encoder, 'classes_'):
-                predicted_dos_variant = str(self.label_encoder.classes_[predicted_class_idx])
+                class_label = str(self.label_encoder.classes_[predicted_class_idx])
+                predicted_dos_variant = self.dos_variant_labels.get(class_label, self.dos_variant_labels.get(predicted_class_idx, class_label))
             else:
-                predicted_dos_variant = f"dos_variant_{predicted_class_idx}"
+                predicted_dos_variant = self.dos_variant_labels.get(predicted_class_idx, f"dos_variant_{predicted_class_idx}")
 
             # Get top-k predictions for DoS variants
             top_k = 3
@@ -304,15 +486,19 @@ class Level3CNNPredictionService:
             top_k_predictions = []
 
             for idx in top_k_indices:
-                dos_variant = str(self.label_encoder.classes_[idx]) if hasattr(self.label_encoder, 'classes_') else f"dos_variant_{idx}"
+                if hasattr(self.label_encoder, 'classes_'):
+                    class_label = str(self.label_encoder.classes_[idx])
+                    dos_variant = self.dos_variant_labels.get(class_label, self.dos_variant_labels.get(idx, class_label))
+                else:
+                    dos_variant = self.dos_variant_labels.get(idx, f"dos_variant_{idx}")
                 prob = float(predictions[0][idx])
                 top_k_predictions.append({
                     'dos_variant': dos_variant,
                     'probability': prob
                 })
 
-            # Update stats
-            self.dos_variants_stats[predicted_dos_variant] += 1
+            # Update stats using class label as key (not readable name)
+            self.dos_variants_stats[class_label] += 1
 
             result = {
                 'predicted_dos_variant': predicted_dos_variant,
@@ -340,11 +526,18 @@ class Level3CNNPredictionService:
         try:
             # Define severity scores cho different DoS variants
             # Mapping khớp với label_encoder.classes_ từ training: ['2', '3', '4', '5']
+            # Và các readable names từ dos_variant_labels mapping
             severity_map = {
+                # Class indices từ label_encoder.classes_
                 '2': {'base_severity': 'high', 'impact_score': 9, 'description': 'DoS Hulk - HTTP Flood - High bandwidth consumption'},
                 '3': {'base_severity': 'high', 'impact_score': 8, 'description': 'DoS GoldenEye - Slowloris variant - Resource exhaustion'},
                 '4': {'base_severity': 'medium', 'impact_score': 7, 'description': 'DoS Slowloris - Slow POST - Connection pool exhaustion'},
                 '5': {'base_severity': 'medium', 'impact_score': 6, 'description': 'DoS Slowhttptest - Slow HTTP headers - Memory exhaustion'},
+                # Readable names từ dos_variant_labels mapping
+                'dos hulk': {'base_severity': 'high', 'impact_score': 9, 'description': 'DoS Hulk - HTTP Flood - High bandwidth consumption'},
+                'dos goldeneye': {'base_severity': 'high', 'impact_score': 8, 'description': 'DoS GoldenEye - Slowloris variant - Resource exhaustion'},
+                'dos slowloris': {'base_severity': 'medium', 'impact_score': 7, 'description': 'DoS Slowloris - Slow POST - Connection pool exhaustion'},
+                'dos slowhttptest': {'base_severity': 'medium', 'impact_score': 6, 'description': 'DoS Slowhttptest - Slow HTTP headers - Memory exhaustion'},
                 # Legacy mappings for backward compatibility
                 'hulk': {'base_severity': 'high', 'impact_score': 9, 'description': 'HTTP Flood - High bandwidth consumption'},
                 'goldeneye': {'base_severity': 'high', 'impact_score': 8, 'description': 'Slowloris variant - Resource exhaustion'},
@@ -430,11 +623,12 @@ class Level3CNNPredictionService:
             ])
 
         # Specific actions based on DoS variant
-        if 'slow' in dos_variant.lower():
+        dos_variant_lower = dos_variant.lower()
+        if 'slow' in dos_variant_lower or 'slowhttptest' in dos_variant_lower:
             base_actions.append("Check connection pool limits")
-        elif 'hulk' in dos_variant.lower():
+        elif 'hulk' in dos_variant_lower:
             base_actions.append("Implement HTTP request throttling")
-        elif 'goldeneye' in dos_variant.lower():
+        elif 'goldeneye' in dos_variant_lower:
             base_actions.append("Review slowloris protection mechanisms")
 
         return base_actions
@@ -452,29 +646,28 @@ class Level3CNNPredictionService:
                 self.skipped_count += 1
                 return None  # Skip non-DoS attacks
 
-            # Try to use preprocessed CNN features first (recommended)
-            # Navigate through nested structure: level2_message -> level1_message -> original_message -> cnn_features
+            # Always preprocess from raw features with Level 3 metadata
+            # DO NOT use cnn_features from upstream as it uses Level 1 feature ordering
+            # Navigate through nested structure: level2_message -> level1_message -> original_message -> features
             original_message = message.get('original_message', {})
             if isinstance(original_message, dict):
                 level1_message = original_message.get('original_message', {})
                 if isinstance(level1_message, dict):
-                    cnn_features = level1_message.get('cnn_features')
-                    if cnn_features is not None:
-                        # Convert list back to numpy array if needed
-                        if isinstance(cnn_features, list):
-                            X = np.array(cnn_features, dtype=np.float32)
-                        else:
-                            X = np.array([cnn_features], dtype=np.float32)
-                        self.logger.debug("Using preprocessed CNN features for message %s", message_id)
-                    else:
-                        # Fallback: preprocess from raw features (not recommended - may cause inconsistencies)
-                        self.logger.warning("No preprocessed CNN features found, falling back to raw features preprocessing")
-                        original_features = level1_message.get('features', {})
-                        X = self.preprocess_features(original_features)
-                        if X is None:
-                            self.logger.warning("Failed to preprocess features for message %s", message_id)
-                            self.error_count += 1
-                            return None
+                    original_features = level1_message.get('features', {})
+
+                    if not original_features:
+                        self.logger.warning("No raw features found for message %s", message_id)
+                        self.error_count += 1
+                        return None
+
+                    # Preprocess with Level 3 feature ordering (required for Level 3 model)
+                    X = self.preprocess_features(original_features)
+                    if X is None:
+                        self.logger.warning("Failed to preprocess features for message %s", message_id)
+                        self.error_count += 1
+                        return None
+
+                    self.logger.debug("Preprocessed features with Level 3 metadata for message %s", message_id)
                 else:
                     self.logger.warning("Invalid level1 message structure for message %s", message_id)
                     self.error_count += 1
@@ -503,15 +696,19 @@ class Level3CNNPredictionService:
             dos_variant = prediction_result.get('predicted_dos_variant', 'unknown')
             confidence = prediction_result.get('confidence', 0.0)
             severity = prediction_result.get('severity_assessment', {}).get('severity_level', 'unknown')
+            predicted_class_idx = prediction_result.get('predicted_class_idx', 0)
+
+            # Get class label for stats (use predicted_class_idx to get class label)
+            class_label_for_stats = str(self.label_encoder.classes_[predicted_class_idx]) if hasattr(self.label_encoder, 'classes_') else str(predicted_class_idx)
 
             if confidence > 0:
-                self.confidence_summary.setdefault(dos_variant, []).append(confidence)
+                self.confidence_summary.setdefault(class_label_for_stats, []).append(confidence)
 
             severity_text = f"[{severity.upper()}]"
             self.logger.info(f"DoS Variant: {dos_variant} | Severity: {severity} | Confidence: {confidence:.3f}")
 
             # Log stats periodically
-            if self.variant_classified_count % 10 == 0:
+            if self.variant_classified_count % 1 == 0:
                 self._log_summary()
 
             return result
@@ -696,6 +893,7 @@ def main():
     parser.add_argument("--model-path", default="artifacts_cnn_level3/dos_classifier_cnn_best.h5", help="Path to CNN model")
     parser.add_argument("--scaler-path", default="artifacts_cnn_level3/scaler.joblib", help="Path to scaler")
     parser.add_argument("--label-encoder-path", default="artifacts_cnn_level3/label_encoder.joblib", help="Path to label encoder")
+    parser.add_argument("--metadata-path", default="artifacts_cnn_level3/training_metadata.json", help="Path to training metadata")
     parser.add_argument("--confidence-threshold", type=float, default=0.6, help="Confidence threshold for processing")
     parser.add_argument("--poll-timeout", type=int, default=1000, help="Poll timeout in ms")
     parser.add_argument("--dos-types", nargs="+", default=['dos', 'ddos', 'hulk', 'goldeneye', 'slowloris', 'slowhttptest'],
@@ -712,6 +910,7 @@ def main():
         model_path=args.model_path,
         scaler_path=args.scaler_path,
         label_encoder_path=args.label_encoder_path,
+        metadata_path=args.metadata_path,
         confidence_threshold=args.confidence_threshold,
         poll_timeout=args.poll_timeout,
         dos_attack_types=args.dos_types

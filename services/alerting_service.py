@@ -58,6 +58,11 @@ class AlertingService:
             'dos goldeneye': 0.7,
             'dos slowloris': 0.7,
             'dos slowhttptest': 0.7,
+            # New Level 3 DoS variants with readable names
+            'dos hulk': 0.7,
+            'dos goldeneye': 0.7,
+            'dos slowloris': 0.7,
+            'dos slowhttptest': 0.7,
             'ddos': 0.6,
             'portscan': 0.65,
             'default': 0.7
@@ -235,7 +240,7 @@ class AlertingService:
             else:
                 attack_type = str(attack_type_raw).lower()
         elif 'predicted_dos_variant' in prediction:
-            # Level 3 CNN: predicted_dos_variant can be string or int
+            # Level 3 CNN: predicted_dos_variant should now be readable names like "DoS Hulk"
             dos_variant_raw = prediction.get('predicted_dos_variant', '')
             if isinstance(dos_variant_raw, str):
                 attack_type = dos_variant_raw.lower()
@@ -300,9 +305,9 @@ class AlertingService:
         # Kiểm tra xem là Level 3 hay Level 2
         level3_pred = prediction_result.get('level3_prediction', {})
         level2_pred = prediction_result.get('level2_prediction', {})
-        
+
         if level3_pred:
-            # Level 3: DoS chi tiết
+            # Level 3: DoS chi tiết - now returns readable names like "DoS Hulk"
             attack_type = level3_pred.get('predicted_dos_variant', 'Unknown')
             confidence = level3_pred.get('confidence', 0.0)
             group = 'dos'
@@ -395,14 +400,15 @@ class AlertingService:
             confidence = level2_pred.get('confidence', 0.0)
             prediction_level = 'Level 2'
 
-        # Convert attack_type to string if it's int
+        # Convert attack_type to readable string
         if isinstance(attack_type_raw, str):
             attack_type = attack_type_raw
         elif isinstance(attack_type_raw, int):
             # Map int to string: 0=dos, 1=ddos, 2=portscan for Level 2
-            # For Level 3, dos variants are usually strings but handle int case
+            # For Level 3, dos variants should be readable names now
             if level3_pred:
-                attack_type = str(attack_type_raw)
+                # Level 3 should now return readable names like "DoS Hulk"
+                attack_type = f"dos_variant_{attack_type_raw}"
             else:
                 attack_type_map = {0: 'dos', 1: 'ddos', 2: 'portscan'}
                 attack_type = attack_type_map.get(attack_type_raw, f'attack_type_{attack_type_raw}')

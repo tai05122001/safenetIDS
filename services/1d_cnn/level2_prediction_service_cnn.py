@@ -50,6 +50,7 @@ class Level2CNNPredictionService:
         model_path: str = "artifacts_cnn_level2/attack_classifier_cnn_best.h5",
         scaler_path: str = "artifacts_cnn_level2/scaler.joblib",
         label_encoder_path: str = "artifacts_cnn_level2/label_encoder.joblib",
+        metadata_path: str = "artifacts_cnn_level2/training_metadata.json",
         poll_timeout: int = 1000,
         max_retries: int = 3,
         confidence_threshold: float = 0.5
@@ -67,6 +68,7 @@ class Level2CNNPredictionService:
         self.model_path = Path(model_path)
         self.scaler_path = Path(scaler_path)
         self.label_encoder_path = Path(label_encoder_path)
+        self.metadata_path = Path(metadata_path)
 
         # Components
         self.consumer: Optional[KafkaConsumer] = None
@@ -74,6 +76,10 @@ class Level2CNNPredictionService:
         self.model: Optional[tf.keras.Model] = None
         self.scaler = None
         self.label_encoder = None
+
+        # Feature columns for consistent ordering
+        self.feature_columns = None
+        self.metadata = None
 
         # Stats
         self.processed_count = 0
@@ -153,9 +159,36 @@ class Level2CNNPredictionService:
         self.logger.info(f"Received signal {signum}, shutting down gracefully...")
         self.stop()
 
+    def load_feature_columns(self) -> bool:
+        """Load feature columns từ training metadata để đảm bảo thứ tự đúng."""
+        try:
+            self.logger.info("Loading feature columns từ: %s", self.metadata_path)
+            if not self.metadata_path.exists():
+                self.logger.warning("Training metadata not found, using default feature order")
+                return False
+
+            with open(self.metadata_path, 'r', encoding='utf-8') as f:
+                self.metadata = json.load(f)
+
+            self.feature_columns = self.metadata.get('data_info', {}).get('feature_columns', [])
+            if self.feature_columns:
+                self.logger.info(f"Loaded {len(self.feature_columns)} feature columns from training metadata")
+                self.logger.info(f"First 5 features: {self.feature_columns[:5]}")
+                return True
+            else:
+                self.logger.warning("No feature columns found in metadata")
+                return False
+
+        except Exception as e:
+            self.logger.error("Failed to load feature columns: %s", str(e))
+            return False
+
     def load_model(self) -> bool:
         """Load CNN model và preprocessing artifacts."""
         try:
+            # Load feature columns first
+            self.load_feature_columns()
+
             self.logger.info("Loading Level 2 CNN model từ: %s", self.model_path)
             if not self.model_path.exists():
                 raise FileNotFoundError(f"Model file not found: {self.model_path}")
@@ -266,20 +299,151 @@ class Level2CNNPredictionService:
             return False
 
     def preprocess_features(self, features: Dict[str, Any]) -> Optional[np.ndarray]:
-        """Preprocess features cho Level 2 CNN model."""
+        """Preprocess features cho Level 2 CNN model với đúng thứ tự từ training."""
         try:
-            # Convert features dict to array
-            feature_values = []
-            for key, value in sorted(features.items()):  # Sort để đảm bảo thứ tự
-                if isinstance(value, (int, float)):
-                    feature_values.append(float(value))
-                else:
-                    # Handle non-numeric values
-                    feature_values.append(0.0)
+            # Get mapping từ raw CICIDS2017 names sang processed names (tương tự Level 1)
+            raw_to_processed = {
+                ' Destination Port': 'destination_port',
+                ' Flow Duration': 'flow_duration',
+                ' Total Fwd Packets': 'total_fwd_packets',
+                ' Total Backward Packets': 'total_backward_packets',
+                'Total Length of Fwd Packets': 'total_length_of_fwd_packets',
+                ' Total Length of Bwd Packets': 'total_length_of_bwd_packets',
+                ' Fwd Packet Length Max': 'fwd_packet_length_max',
+                ' Fwd Packet Length Min': 'fwd_packet_length_min',
+                ' Fwd Packet Length Mean': 'fwd_packet_length_mean',
+                ' Fwd Packet Length Std': 'fwd_packet_length_std',
+                'Bwd Packet Length Max': 'bwd_packet_length_max',
+                ' Bwd Packet Length Min': 'bwd_packet_length_min',
+                ' Bwd Packet Length Mean': 'bwd_packet_length_mean',
+                ' Bwd Packet Length Std': 'bwd_packet_length_std',
+                'Flow Bytes/s': 'flow_bytes_s',
+                ' Flow Packets/s': 'flow_packets_s',
+                ' Flow IAT Mean': 'flow_iat_mean',
+                ' Flow IAT Std': 'flow_iat_std',
+                ' Flow IAT Max': 'flow_iat_max',
+                ' Flow IAT Min': 'flow_iat_min',
+                'Fwd IAT Total': 'fwd_iat_total',
+                ' Fwd IAT Mean': 'fwd_iat_mean',
+                ' Fwd IAT Std': 'fwd_iat_std',
+                ' Fwd IAT Max': 'fwd_iat_max',
+                ' Fwd IAT Min': 'fwd_iat_min',
+                'Bwd IAT Total': 'bwd_iat_total',
+                ' Bwd IAT Mean': 'bwd_iat_mean',
+                ' Bwd IAT Std': 'bwd_iat_std',
+                ' Bwd IAT Max': 'bwd_iat_max',
+                ' Bwd IAT Min': 'bwd_iat_min',
+                'Fwd PSH Flags': 'fwd_psh_flags',
+                ' Bwd PSH Flags': 'bwd_psh_flags',
+                ' Fwd URG Flags': 'fwd_urg_flags',
+                ' Bwd URG Flags': 'bwd_urg_flags',
+                ' Fwd Header Length': 'fwd_header_length',
+                ' Bwd Header Length': 'bwd_header_length',
+                'Fwd Packets/s': 'fwd_packets_s',
+                ' Bwd Packets/s': 'bwd_packets_s',
+                ' Min Packet Length': 'min_packet_length',
+                ' Max Packet Length': 'max_packet_length',
+                ' Packet Length Mean': 'packet_length_mean',
+                ' Packet Length Std': 'packet_length_std',
+                ' Packet Length Variance': 'packet_length_variance',
+                'FIN Flag Count': 'fin_flag_count',
+                ' SYN Flag Count': 'syn_flag_count',
+                ' RST Flag Count': 'rst_flag_count',
+                ' PSH Flag Count': 'psh_flag_count',
+                ' ACK Flag Count': 'ack_flag_count',
+                ' URG Flag Count': 'urg_flag_count',
+                ' CWE Flag Count': 'cwe_flag_count',
+                ' ECE Flag Count': 'ece_flag_count',
+                ' Down/Up Ratio': 'down_up_ratio',
+                ' Average Packet Size': 'average_packet_size',
+                ' Avg Fwd Segment Size': 'avg_fwd_segment_size',
+                ' Avg Bwd Segment Size': 'avg_bwd_segment_size',
+                ' Fwd Header Length.1': 'fwd_header_length_1',
+                'Fwd Avg Bytes/Bulk': 'fwd_avg_bytes_bulk',
+                ' Fwd Avg Packets/Bulk': 'fwd_avg_packets_bulk',
+                ' Fwd Avg Bulk Rate': 'fwd_avg_bulk_rate',
+                ' Bwd Avg Bytes/Bulk': 'bwd_avg_bytes_bulk',
+                ' Bwd Avg Packets/Bulk': 'bwd_avg_packets_bulk',
+                'Bwd Avg Bulk Rate': 'bwd_avg_bulk_rate',
+                'Subflow Fwd Packets': 'subflow_fwd_packets',
+                ' Subflow Fwd Bytes': 'subflow_fwd_bytes',
+                ' Subflow Bwd Packets': 'subflow_bwd_packets',
+                ' Subflow Bwd Bytes': 'subflow_bwd_bytes',
+                'Init_Win_bytes_forward': 'init_win_bytes_forward',
+                ' Init_Win_bytes_backward': 'init_win_bytes_backward',
+                ' act_data_pkt_fwd': 'act_data_pkt_fwd',
+                ' min_seg_size_forward': 'min_seg_size_forward',
+                'Active Mean': 'active_mean',
+                ' Active Std': 'active_std',
+                ' Active Max': 'active_max',
+                ' Active Min': 'active_min',
+                'Idle Mean': 'idle_mean',
+                ' Idle Std': 'idle_std',
+                ' Idle Max': 'idle_max',
+                ' Idle Min': 'idle_min'
+            }
+
+            # Convert features dict to array theo đúng thứ tự training
+            if self.feature_columns:
+                # Use feature columns from metadata for consistent ordering
+                feature_values = []
+                for feature_name in self.feature_columns:
+                    value = None
+
+                    # Try different possible column name formats
+                    possible_names = [
+                        feature_name,  # snake_case (processed)
+                        raw_to_processed.get(feature_name, feature_name)  # raw with spaces (fallback to same name if not found)
+                    ]
+
+                    # Remove duplicates
+                    possible_names = list(set(possible_names))
+
+                    # Try to find the value in data
+                    for name in possible_names:
+                        if name in features:
+                            value = features[name]
+                            break
+
+                    # Convert to float
+                    if value is not None:
+                        try:
+                            if isinstance(value, str):
+                                if value.strip() == '':
+                                    feature_values.append(0.0)
+                                else:
+                                    numeric_value = float(value)
+                                    if np.isinf(numeric_value) or np.isnan(numeric_value):
+                                        feature_values.append(0.0)
+                                    else:
+                                        feature_values.append(numeric_value)
+                            elif isinstance(value, (int, float)):
+                                if np.isinf(value) or np.isnan(value):
+                                    feature_values.append(0.0)
+                                else:
+                                    feature_values.append(float(value))
+                            else:
+                                feature_values.append(0.0)
+                        except (ValueError, TypeError):
+                            feature_values.append(0.0)
+                    else:
+                        feature_values.append(0.0)
+            else:
+                # Fallback: sort alphabetically (not recommended)
+                self.logger.warning("No feature columns loaded, using alphabetical sorting (may cause prediction errors)")
+                feature_values = []
+                for key, value in sorted(features.items()):
+                    if isinstance(value, (int, float)):
+                        if np.isinf(value) or np.isnan(value):
+                            feature_values.append(0.0)
+                        else:
+                            feature_values.append(float(value))
+                    else:
+                        feature_values.append(0.0)
 
             X = np.array([feature_values], dtype=np.float32)
 
-            # Handle NaN values
+            # Handle NaN values (additional safety)
             if np.isnan(X).any():
                 X = np.nan_to_num(X, nan=0.0)
 
@@ -374,25 +538,24 @@ class Level2CNNPredictionService:
                 self.skipped_count += 1
                 return None  # Skip benign traffic
 
-            # Try to use preprocessed CNN features first (recommended)
+            # Always preprocess from raw features with Level 2 metadata
+            # DO NOT use cnn_features from upstream as it uses Level 1 feature ordering
             original_message = message.get('original_message', {})
-            cnn_features = original_message.get('cnn_features')
-            if cnn_features is not None:
-                # Convert list back to numpy array if needed
-                if isinstance(cnn_features, list):
-                    X = np.array(cnn_features, dtype=np.float32)
-                else:
-                    X = np.array([cnn_features], dtype=np.float32)
-                self.logger.debug("Using preprocessed CNN features for message %s", message_id)
-            else:
-                # Fallback: preprocess from raw features (not recommended - may cause inconsistencies)
-                self.logger.warning("No preprocessed CNN features found, falling back to raw features preprocessing")
-                original_features = original_message.get('features', {})
-                X = self.preprocess_features(original_features)
-                if X is None:
-                    self.logger.warning("Failed to preprocess features for message %s", message_id)
-                    self.error_count += 1
-                    return None
+            original_features = original_message.get('features', {})
+
+            if not original_features:
+                self.logger.warning("No raw features found for message %s", message_id)
+                self.error_count += 1
+                return None
+
+            # Preprocess with Level 2 feature ordering (required for Level 2 model)
+            X = self.preprocess_features(original_features)
+            if X is None:
+                self.logger.warning("Failed to preprocess features for message %s", message_id)
+                self.error_count += 1
+                return None
+
+            self.logger.debug("Preprocessed features with Level 2 metadata for message %s", message_id)
 
             # Make attack type prediction
             prediction_result = self.predict_attack_type(X)
@@ -435,7 +598,7 @@ class Level2CNNPredictionService:
                 self.attack_confidence_summary.setdefault(readable_attack_type, []).append(confidence)
 
             # Log stats periodically
-            if self.processed_count % 10 == 0:
+            if self.processed_count % 1 == 0:
                 self._log_summary()
 
             return result
@@ -685,6 +848,7 @@ def main():
     parser.add_argument("--model-path", default="artifacts_cnn_level2/attack_classifier_cnn_final.h5", help="Path to CNN model")
     parser.add_argument("--scaler-path", default="artifacts_cnn_level2/scaler.joblib", help="Path to scaler")
     parser.add_argument("--label-encoder-path", default="artifacts_cnn_level2/label_encoder.joblib", help="Path to label encoder")
+    parser.add_argument("--metadata-path", default="artifacts_cnn_level2/training_metadata.json", help="Path to training metadata")
     parser.add_argument("--confidence-threshold", type=float, default=0.5, help="Confidence threshold for processing")
     parser.add_argument("--poll-timeout", type=int, default=1000, help="Poll timeout in ms")
 
@@ -699,6 +863,7 @@ def main():
         model_path=args.model_path,
         scaler_path=args.scaler_path,
         label_encoder_path=args.label_encoder_path,
+        metadata_path=args.metadata_path,
         confidence_threshold=args.confidence_threshold,
         poll_timeout=args.poll_timeout
     )

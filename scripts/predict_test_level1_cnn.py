@@ -1,22 +1,22 @@
 """
-Script predict tập test với model CNN Level 1.
+Script predict tập test với model CNN Level 2 - Attack Types Classification.
 
 Script này:
-1. Load model CNN đã train từ artifacts_cnn/
-2. Load test data từ dataset/splits/level1/test.pkl
-3. Preprocess và predict
+1. Load model CNN Level 2 đã train từ artifacts_cnn_level2/
+2. Load test data từ dataset/splits/level2/test.pkl (chỉ malicious samples)
+3. Preprocess và predict attack types (dos, ddos, portscan)
 4. Tính metrics (accuracy, precision, recall, F1, confusion matrix)
 5. Lưu kết quả và visualization
 
 Ví dụ chạy:
-python scripts/predict_test_level1_cnn.py \
-    --model-path artifacts_cnn/cnn_model_best.h5 \
-    --scaler-path artifacts_cnn/scaler.joblib \
-    --label-encoder-path artifacts_cnn/label_encoder.joblib \
-    --test-data-path dataset/splits/level1/test.pkl \
-    --label-column label_binary_encoded \
-    --drop-columns label_group label label_encoded label_group_encoded label_attack_type_encoded \
-    --output-dir reports/level1_cnn_test_predictions
+python scripts/predict_test_level2_cnn.py \
+    --model-path artifacts_cnn_level2/attack_classifier_cnn_best.h5 \
+    --scaler-path artifacts_cnn_level2/scaler.joblib \
+    --label-encoder-path artifacts_cnn_level2/label_encoder.joblib \
+    --test-data-path dataset/splits/level2/test.pkl \
+    --label-column label_attack_type_encoded \
+    --drop-columns label_group label label_encoded label_group_encoded label_binary_encoded \
+    --output-dir reports/level2_cnn_test_predictions
 """
 
 import argparse

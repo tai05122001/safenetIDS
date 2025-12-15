@@ -1617,7 +1617,7 @@ Examples:
         else:
             # Nhiều interfaces, chọn interface đầu tiên không phải loopback
             # Ưu tiên: Wi-Fi > Ethernet > Others
-            priority_keywords = ['wi-fi', 'wifi', 'wireless', 'wlan', 'ethernet', 'eth', 'en0', 'en1']
+            priority_keywords = ['ethernet', 'eth', 'en0', 'en1','wi-fi', 'wifi', 'wireless', 'wlan']
             selected_interface = None
             
             for keyword in priority_keywords:
