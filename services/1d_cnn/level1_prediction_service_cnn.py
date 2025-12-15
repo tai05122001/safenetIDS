@@ -33,7 +33,7 @@ class Level1CNNPredictionService:
         self,
         kafka_servers: str = "localhost:9092",
         group_id: str = "level1_cnn_service",
-        input_topic: str = "preprocess_data",
+        input_topic: str = "cnn_preprocess_data",
         output_topic: str = "level1_predictions",
         model_path: str = "artifacts_cnn/cnn_model_best.h5",
         scaler_path: str = "artifacts_cnn/scaler.joblib",
@@ -657,7 +657,7 @@ def main():
     parser = argparse.ArgumentParser(description="Level 1 CNN Prediction Service")
     parser.add_argument("--kafka-servers", default="localhost:9092", help="Kafka servers")
     parser.add_argument("--group-id", default="level1_cnn_service", help="Consumer group ID")
-    parser.add_argument("--input-topic", default="preprocess_data", help="Input topic")
+    parser.add_argument("--input-topic", default="cnn_preprocess_data", help="Input topic")
     parser.add_argument("--output-topic", default="level_1_predictions", help="Output topic")
     parser.add_argument("--model-path", default="artifacts_cnn/cnn_model_best.h5", help="Path to CNN model")
     parser.add_argument("--scaler-path", default="artifacts_cnn/scaler.joblib", help="Path to scaler")
