@@ -6,7 +6,10 @@ matplotlib>=3.8
 kafka-python>=2.0.2
 streamlit>=1.28
 seaborn>=0.13
-# tensorflow>=2.15  # Tuỳ chọn: chỉ cần nếu muốn lưu pipeline dưới định dạng .h5
+
+# Deep Learning frameworks (cho CNN models)
+tensorflow>=2.15.0  # TensorFlow/Keras cho CNN 1D
+keras>=2.15.0       # Keras API
 
 # Gradient Boosting models (cần cho ensemble voting và các model riêng lẻ)
 # Nếu chỉ dùng random_forest thì có thể bỏ qua

@@ -14,16 +14,8 @@ from datetime import datetime, timedelta
 from typing import Dict, Any, List
 from collections import defaultdict
 
-# Cấu hình logging
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    handlers=[
-        logging.FileHandler('services/logs/alerting.log'),
-        logging.StreamHandler()
-    ]
-)
-logger = logging.getLogger('Alerting')
+# Logger sẽ được khởi tạo trong hàm main()
+logger = None
 
 class AlertingService:
     """Service tạo và quản lý alerts từ kết quả predictions"""
@@ -227,10 +219,38 @@ class AlertingService:
         Returns:
             True nếu nên tạo alert
         """
-        attack_type = prediction.get('label', '').lower()
+        # Handle different prediction formats from CNN services
+        if 'predicted_class' in prediction:
+            # Level 1 CNN: predicted_class is integer (0=benign, 1=malicious)
+            attack_type = 'malicious' if prediction.get('predicted_class', 0) == 1 else 'benign'
+        elif 'predicted_attack_type' in prediction:
+            # Level 2 CNN: predicted_attack_type can be string or int
+            attack_type_raw = prediction.get('predicted_attack_type', '')
+            if isinstance(attack_type_raw, str):
+                attack_type = attack_type_raw.lower()
+            elif isinstance(attack_type_raw, int):
+                # Map int to string: 0=dos, 1=ddos, 2=portscan
+                attack_type_map = {0: 'dos', 1: 'ddos', 2: 'portscan'}
+                attack_type = attack_type_map.get(attack_type_raw, f'attack_type_{attack_type_raw}')
+            else:
+                attack_type = str(attack_type_raw).lower()
+        elif 'predicted_dos_variant' in prediction:
+            # Level 3 CNN: predicted_dos_variant can be string or int
+            dos_variant_raw = prediction.get('predicted_dos_variant', '')
+            if isinstance(dos_variant_raw, str):
+                attack_type = dos_variant_raw.lower()
+            else:
+                attack_type = str(dos_variant_raw).lower()
+        else:
+            # Fallback for other formats
+            label_raw = prediction.get('label', '')
+            if isinstance(label_raw, str):
+                attack_type = label_raw.lower()
+            else:
+                attack_type = str(label_raw).lower()
 
         # Không tạo alert cho benign
-        if 'benign' in attack_type or attack_type == 'error':
+        if 'benign' in attack_type or attack_type == 'error' or attack_type == '':
             return False
 
         confidence = prediction.get('confidence', 0.0)
@@ -283,14 +303,14 @@ class AlertingService:
         
         if level3_pred:
             # Level 3: DoS chi tiết
-            attack_type = level3_pred.get('label', 'Unknown')
+            attack_type = level3_pred.get('predicted_dos_variant', 'Unknown')
             confidence = level3_pred.get('confidence', 0.0)
             group = 'dos'
         else:
             # Level 2: ddos, portscan
-            attack_type = level2_pred.get('label', 'Unknown')
+            attack_type = level2_pred.get('predicted_attack_type', 'Unknown')
             confidence = level2_pred.get('confidence', 0.0)
-            group = level2_pred.get('group', 'unknown')
+            group = level2_pred.get('predicted_attack_type', 'unknown')
 
         network_info = self._extract_network_info(prediction_result)
 
@@ -367,13 +387,27 @@ class AlertingService:
 
         # Thông tin prediction - ưu tiên Level 3 (DoS chi tiết)
         if level3_pred:
-            attack_type = level3_pred.get('label', 'Unknown')
+            attack_type_raw = level3_pred.get('predicted_dos_variant', 'Unknown')
             confidence = level3_pred.get('confidence', 0.0)
             prediction_level = 'Level 3 (DoS Detail)'
         else:
-            attack_type = level2_pred.get('label', 'Unknown')
+            attack_type_raw = level2_pred.get('predicted_attack_type', 'Unknown')
             confidence = level2_pred.get('confidence', 0.0)
             prediction_level = 'Level 2'
+
+        # Convert attack_type to string if it's int
+        if isinstance(attack_type_raw, str):
+            attack_type = attack_type_raw
+        elif isinstance(attack_type_raw, int):
+            # Map int to string: 0=dos, 1=ddos, 2=portscan for Level 2
+            # For Level 3, dos variants are usually strings but handle int case
+            if level3_pred:
+                attack_type = str(attack_type_raw)
+            else:
+                attack_type_map = {0: 'dos', 1: 'ddos', 2: 'portscan'}
+                attack_type = attack_type_map.get(attack_type_raw, f'attack_type_{attack_type_raw}')
+        else:
+            attack_type = str(attack_type_raw)
 
         # Tính severity
         severity = self._calculate_severity(attack_type.lower(), confidence)
@@ -537,7 +571,7 @@ class AlertingService:
             if 'level3_prediction' in prediction_result:
                 # Đây là kết quả Level 3 - DoS chi tiết
                 level3_pred = prediction_result['level3_prediction']
-                attack_type = level3_pred.get('label', 'Unknown')
+                attack_type = level3_pred.get('predicted_dos_variant', 'Unknown')
 
                 if self._should_create_alert(level3_pred):
                     # Tạo alert từ Level 3 (DoS chi tiết)
@@ -560,7 +594,17 @@ class AlertingService:
             elif 'level2_prediction' in prediction_result:
                 # Đây là kết quả Level 2
                 level2_pred = prediction_result['level2_prediction']
-                attack_type = level2_pred.get('label', 'Unknown').lower()
+                attack_type_raw = level2_pred.get('predicted_attack_type', 'Unknown')
+
+                # Handle both string and int types for attack_type
+                if isinstance(attack_type_raw, str):
+                    attack_type = attack_type_raw.lower()
+                elif isinstance(attack_type_raw, int):
+                    # Map int to string: 0=dos, 1=ddos, 2=portscan
+                    attack_type_map = {0: 'dos', 1: 'ddos', 2: 'portscan'}
+                    attack_type = attack_type_map.get(attack_type_raw, f'attack_type_{attack_type_raw}')
+                else:
+                    attack_type = str(attack_type_raw).lower()
 
                 # Nếu từ level_2_predictions và là dos -> đợi Level 3
                 if topic_name == 'level_2_predictions' and attack_type == 'dos':
@@ -619,7 +663,9 @@ class AlertingService:
 
         alert_id = f"IDS-L1-{int(datetime.now().timestamp() * 1000)}"
 
-        attack_type = level1_pred.get('label', 'Unknown')
+        # Level 1 CNN returns predicted_class as integer (0=benign, 1=malicious)
+        predicted_class = level1_pred.get('predicted_class', 0)
+        attack_type = 'malicious' if predicted_class == 1 else 'benign'
         confidence = level1_pred.get('confidence', 0.0)
         severity = self._calculate_severity(attack_type.lower(), confidence)
 
@@ -720,6 +766,20 @@ def main():
     import os
     os.makedirs('services/logs', exist_ok=True)
     os.makedirs('services/data', exist_ok=True)
+
+    # Cấu hình logging sau khi tạo thư mục
+    logging.basicConfig(
+        level=logging.INFO,
+        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+        handlers=[
+            logging.FileHandler('services/logs/alerting.log'),
+            logging.StreamHandler()
+        ]
+    )
+
+    # Tạo logger
+    global logger
+    logger = logging.getLogger('Alerting')
 
     # Cập nhật thresholds
     thresholds = {

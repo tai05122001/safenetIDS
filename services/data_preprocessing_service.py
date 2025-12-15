@@ -12,15 +12,17 @@ Chức năng chính:
 Luồng xử lý:
 1. Nhận message từ raw_data_event (consumer)
 2. Parse JSON thành Python dict
-3. Áp dụng preprocessing pipeline (giống hệt preprocess_dataset.py, TRỪ scaling):
+3. Áp dụng preprocessing pipeline tùy theo model_type:
    - Normalize column names
    - Replace inf/-inf với NaN
    - Convert numeric columns
    - Fill missing values (median/mode)
    - Encode label và tạo label_group
-   - Drop constant columns
+   - Drop constant columns (skip cho single record)
    - Clip outliers IQR
-   - KHÔNG scale (model sẽ tự scale)
+   - Scale tùy model_type:
+     * Random Forest: Scale ở preprocessing (standard scaling)
+     * CNN+LSTM: KHÔNG scale (model sẽ tự scale)
 4. Gửi kết quả đến preprocess_data
 5. Log và monitoring
 
@@ -82,16 +84,17 @@ class DataPreprocessingService:
     11. IQR outlier clipping
     12. KHÔNG scale (để model tự scale qua StandardScaler trong pipeline)
     
-    Lý do bỏ scaling:
-    - Model Level 1 có ColumnTransformer với StandardScaler trong pipeline
-    - Model đã được train với data đã scale, và sẽ tự scale lại khi predict
+    Lý do bỏ scaling tùy theo model_type:
+    - Random Forest: Scale ở preprocessing vì model không có internal scaler
+    - CNN+LSTM: Không scale ở preprocessing vì model có StandardScaler trong pipeline
     - Nếu scale ở đây sẽ bị double scaling → kết quả sai
     """
 
     def __init__(self,
                  kafka_bootstrap_servers='localhost:9092',
                  input_topic='raw_data_event',
-                 output_topic='preprocess_data'):
+                 output_topic='preprocess_data',
+                 model_type='random_forest'):
         """
         Khởi tạo Data Preprocessing Service
 
@@ -99,12 +102,14 @@ class DataPreprocessingService:
             kafka_bootstrap_servers: Kafka bootstrap servers
             input_topic: Topic để đọc dữ liệu thô
             output_topic: Topic để gửi dữ liệu đã xử lý
+            model_type: Loại model ('random_forest' hoặc 'cnn_lstm')
         """
         self.input_topic = input_topic
         self.output_topic = output_topic
         self.consumer = None
         self.producer = None
         self.kafka_servers = kafka_bootstrap_servers
+        self.model_type = model_type
         self.is_running = False
 
         # Metadata để tái sử dụng logic preprocessing
@@ -543,11 +548,23 @@ class DataPreprocessingService:
             if clip_stats:
                 logger.info(f"Đã clip ngoại lệ cho {len(clip_stats)} cột theo IQR (factor=1.5).")
 
-            # 11. KHÔNG scale ở đây - Model Level 1 có StandardScaler trong pipeline
-            # Model sẽ tự scale với cùng parameters đã fit từ training data
-            # Nếu scale ở đây sẽ bị double scaling → kết quả prediction sai
+            # 11. Scale tùy theo model_type
             scaling_stats: Dict[str, Dict[str, float]] = {}
-            logger.info("Bỏ qua scaling - Model sẽ tự scale khi predict")
+
+            if self.model_type == "random_forest":
+                # Random Forest: Scale ở preprocessing vì model không có internal scaler
+                logger.info("Scale data cho Random Forest (model không có internal scaler)")
+                scaling_stats = self.scale_numeric_features(df, numeric_cols, "standard")
+                if scaling_stats:
+                    logger.info(f"Đã scale {len(scaling_stats)} cột theo standard scaling cho Random Forest")
+
+            elif self.model_type == "cnn_lstm":
+                # CNN+LSTM: Không scale ở preprocessing vì model có StandardScaler trong pipeline
+                logger.info("Bỏ qua scaling cho CNN+LSTM - Model sẽ tự scale khi predict")
+
+            else:
+                # Default: Không scale để an toàn
+                logger.info(f"Bỏ qua scaling cho {self.model_type} - Model sẽ tự scale khi predict")
 
             # Debug: Log số lượng features sau preprocessing
             numeric_features = df.select_dtypes(include=["number"]).columns.difference(skip_cols)
@@ -566,6 +583,7 @@ class DataPreprocessingService:
             # Thêm metadata preprocessing
             processed_record['preprocessing_timestamp'] = datetime.now().isoformat()
             preprocessing_metadata = {
+                'model_type': self.model_type,
                 'label_mapping': label_mapping,
                 'label_group_mapping': label_group_mapping,
                 'label_group_encoded_mapping': label_group_encoded_mapping,
@@ -836,6 +854,9 @@ def main():
                        help='Input topic name')
     parser.add_argument('--output-topic', default='preprocess_data',
                        help='Output topic name')
+    parser.add_argument('--model-type', choices=('random_forest', 'cnn_lstm'),
+                       default='random_forest',
+                       help='Loại model sử dụng: random_forest hoặc cnn_lstm')
 
     args = parser.parse_args()
 
@@ -847,7 +868,8 @@ def main():
     service = DataPreprocessingService(
         kafka_bootstrap_servers=args.kafka_servers,
         input_topic=args.input_topic,
-        output_topic=args.output_topic
+        output_topic=args.output_topic,
+        model_type=args.model_type
     )
 
     try:

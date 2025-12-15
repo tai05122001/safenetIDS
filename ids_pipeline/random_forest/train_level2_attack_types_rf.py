@@ -73,8 +73,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--source-dataset",
         type=Path,
-        default=Path("dataset_clean.pkl"),
-        help="Dataset nguồn dùng để split level 2 nếu chưa có (mặc định: dataset_clean.pkl).",
+        default=Path("dataset_clean_rf.pkl"),
+        help="Dataset nguồn dùng để split level 2 nếu chưa có (mặc định: dataset_clean_rf.pkl).",
     )
     parser.add_argument(
         "--train-variant",
@@ -238,7 +238,7 @@ def build_preprocess_transformer(features: pd.DataFrame) -> ColumnTransformer:
     
     ⚠️ LƯU Ý QUAN TRỌNG VỀ SCALING:
     - Pipeline này có StandardScaler để scale data khi training
-    - Dataset đầu vào (dataset_clean.pkl) KHÔNG nên được scale sẵn
+    - Dataset đầu vào (dataset_clean_rf.pkl) đã được scale sẵn (standard scaling)
     - Nếu dataset đã được scale trong preprocess_dataset.py → DOUBLE SCALING → kết quả SAI!
     - → Luôn sử dụng --scale-method none trong preprocess_dataset.py
     """

@@ -86,8 +86,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--drop-columns",
         nargs="*",
-        default=["label_group", "label", "label_group_encoded", "label_binary_encoded", "label_attack_type_encoded"],
-        help="Danh sách các cột bỏ qua khi huấn luyện (tránh data leakage từ Level 1 và Level 2).",
+        default=["label_group", "label"],
+        help="Danh sách các cột bỏ qua khi huấn luyện (ví dụ: label_group, label gốc).",
     )
     parser.add_argument(
         "--sample-frac",
@@ -122,8 +122,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--source-dataset",
         type=Path,
-        default=Path("dataset_clean.pkl"),
-        help="Dataset nguồn dùng để split level 3 (mặc định: dataset_clean.pkl).",
+        default=Path("dataset_clean_rf.pkl"),
+        help="Dataset nguồn dùng để split level 3 (mặc định: dataset_clean_rf.pkl).",
     )
     parser.add_argument(
         "--split-script",
@@ -216,7 +216,7 @@ def build_preprocess_transformer(features: pd.DataFrame) -> ColumnTransformer:
     
     ⚠️ LƯU Ý QUAN TRỌNG VỀ SCALING:
     - Pipeline này có StandardScaler để scale data khi training
-    - Dataset đầu vào (dataset_clean.pkl) KHÔNG nên được scale sẵn
+    - Dataset đầu vào (dataset_clean_rf.pkl) đã được scale sẵn (standard scaling)
     - Nếu dataset đã được scale trong preprocess_dataset.py → DOUBLE SCALING → kết quả SAI!
     - → Luôn sử dụng --scale-method none trong preprocess_dataset.py
     """
@@ -481,37 +481,6 @@ def run_training_pipeline(
     metrics_val = evaluate_model(pipeline, X_val, y_val, tag="validation")
     metrics_test = evaluate_model(pipeline, X_test, y_test, tag="test")
 
-    # Tạo label_mapping từ encoded values sang label names
-    # Tìm cột label gốc (không phải _encoded) để map
-    original_label_col = None
-    possible_label_cols = ['label', 'Label']
-    for col in possible_label_cols:
-        if col in df_train.columns and col != label_actual:
-            original_label_col = col
-            break
-    
-    # Nếu không tìm thấy, thử tìm cột có chứa 'label' nhưng không phải encoded
-    if original_label_col is None:
-        for col in df_train.columns:
-            if 'label' in col.lower() and '_encoded' not in col.lower() and col != label_actual:
-                original_label_col = col
-                break
-    
-    # Tạo mapping từ encoded values -> label names
-    label_mapping = {}
-    if original_label_col and original_label_col in df_train.columns:
-        for encoded_val in sorted(y_train.unique()):
-            # Lấy một sample với encoded value này
-            sample = df_train[df_train[label_actual] == encoded_val].iloc[0]
-            label_name = str(sample[original_label_col]).strip()
-            label_mapping[int(encoded_val)] = label_name
-    else:
-        # Fallback: Dùng class_labels nếu không tìm thấy label gốc
-        # Mapping sẽ là encoded value -> encoded value (không có tên)
-        for encoded_val in sorted(y_train.unique()):
-            label_mapping[int(encoded_val)] = f"DoS_type_{int(encoded_val)}"
-        logging.warning("Không tìm thấy cột label gốc để tạo label_mapping. Sử dụng fallback mapping.")
-
     metadata = {
         "group": group,
         "normalized_group": normalized_group,
@@ -534,7 +503,6 @@ def run_training_pipeline(
         "class_labels": sorted(y_train.unique()),
         "class_distribution": {int(cls): int(count) for cls, count in class_counts.items()},
         "class_weights": {int(k): float(v) for k, v in pipeline.named_steps['classifier'].class_weight_.items()} if hasattr(pipeline.named_steps['classifier'], 'class_weight_') else None,
-        "label_mapping": label_mapping,
     }
 
     save_artifacts(

@@ -1,5 +1,13 @@
 import pandas as pd
-from services.network_data_producer import NetworkDataProducer
+import sys
+import os
+
+# Add current directory to path for imports
+current_dir = os.path.dirname(os.path.abspath(__file__))
+if current_dir not in sys.path:
+    sys.path.insert(0, current_dir)
+
+from network_data_producer import NetworkDataProducer
 import time
 import random
 from datetime import datetime
@@ -168,18 +176,21 @@ def reset_consumer_group_offset(kafka_bootstrap_servers='localhost:9092',
         logger.error(traceback.format_exc())
         logger.warning("Continuing without offset reset - consumer may read old messages")
 
-def simulate_attack_from_pkl(num_samples=20, pkl_file='dataset.pkl', kafka_bootstrap_servers='localhost:9092', topic='raw_data_event'):
+def simulate_attack_from_pkl(num_samples=5, pkl_file='dataset.pkl', kafka_bootstrap_servers='localhost:9092', topic='raw_data_event', force_reset=True):
     """
     Tải dữ liệu từ dataset.pkl, chọn các mẫu đại diện cho tất cả loại tấn công
     để đảm bảo cả Level 1 và Level 2 model đều có thể hoạt động.
-    
-    Yêu cầu:
-    - BENIGN: 5 samples
-    - DoS attacks: chia đều các loại (Hulk, GoldenEye, slowloris, Slowhttptest), mỗi loại 5 samples
+
+    **MẶC ĐỊNH KHI START (5 samples mỗi loại, oversample nếu cần):**
+    - BENIGN: 5 samples (không tấn công)
+    - DoS attacks: 20 samples (5 samples mỗi loại DoS: hulk, goldeneye, slowloris, slowhttptest)
     - DDoS: 5 samples
     - PortScan: 5 samples
-    
+
     Tổng cộng: 5 + 20 + 5 + 5 = 35 samples
+
+    Nếu dataset không có đủ mẫu cho một loại nào đó, sẽ oversample (lấy mẫu có lặp lại)
+    để đảm bảo có đúng số lượng mẫu mong muốn.
     """
     try:
         df = pd.read_pickle(pkl_file)
@@ -246,51 +257,46 @@ def simulate_attack_from_pkl(num_samples=20, pkl_file='dataset.pkl', kafka_boots
                 samples_df = df.iloc[random_indices]
         else:
             selected_samples = []
-            samples_per_type = 5  # Mỗi loại lấy 5 samples
+            samples_per_type = 5  # Mỗi loại lấy đúng 5 samples (oversample nếu cần)
             
-            # 1. Chọn BENIGN (5 samples)
+            # 1. Chọn BENIGN (5 samples) - Oversample nếu cần
             benign_df = df[df[label_col].isin(benign_labels)]
             if len(benign_df) > 0:
-                num_benign = min(samples_per_type, len(benign_df))
-                benign_samples = benign_df.sample(n=num_benign, random_state=42)
+                # Oversample nếu cần để có đúng 5 mẫu
+                benign_samples = benign_df.sample(n=samples_per_type, replace=True, random_state=42)
                 selected_samples.append(benign_samples)
-                logger.info(f"Selected {len(benign_samples)} BENIGN samples")
+                logger.info(f"Selected {len(benign_samples)} BENIGN samples (oversampled if needed)")
             else:
                 logger.warning("Không tìm thấy BENIGN samples trong dataset!")
-            
-            # 2. Chọn DoS attacks - chia đều các loại (mỗi loại 5 samples)
-            dos_samples_by_subtype = {}
+
+            # 2. Chọn DoS attacks - 5 samples MỖI loại DoS (oversample nếu cần)
             for subtype_name, subtype_labels in dos_subtypes.items():
                 subtype_df = df[df[label_col].isin(subtype_labels)]
                 if len(subtype_df) > 0:
-                    num_subtype = min(samples_per_type, len(subtype_df))
-                    subtype_samples = subtype_df.sample(n=num_subtype, random_state=42)
-                    dos_samples_by_subtype[subtype_name] = subtype_samples
+                    # Oversample nếu cần để có đúng 5 mẫu cho mỗi subtype
+                    subtype_samples = subtype_df.sample(n=samples_per_type, replace=True, random_state=42)
                     selected_samples.append(subtype_samples)
-                    logger.info(f"Selected {len(subtype_samples)} DoS {subtype_name} samples")
+                    logger.info(f"Selected {len(subtype_samples)} DoS {subtype_name} samples (oversampled if needed)")
                 else:
                     logger.warning(f"Không tìm thấy DoS {subtype_name} samples trong dataset!")
-            
-            if len(dos_samples_by_subtype) == 0:
-                logger.warning("Không tìm thấy DoS attack samples trong dataset!")
-            
-            # 3. Chọn DDoS (5 samples)
+
+            # 3. Chọn DDoS (5 samples) - Oversample nếu cần
             ddos_df = df[df[label_col].isin(ddos_labels)]
             if len(ddos_df) > 0:
-                num_ddos = min(samples_per_type, len(ddos_df))
-                ddos_samples = ddos_df.sample(n=num_ddos, random_state=42)
+                # Oversample nếu cần để có đúng 5 mẫu
+                ddos_samples = ddos_df.sample(n=samples_per_type, replace=True, random_state=42)
                 selected_samples.append(ddos_samples)
-                logger.info(f"Selected {len(ddos_samples)} DDoS samples")
+                logger.info(f"Selected {len(ddos_samples)} DDoS samples (oversampled if needed)")
             else:
                 logger.warning("Không tìm thấy DDoS samples trong dataset!")
-            
-            # 4. Chọn PortScan (5 samples)
+
+            # 4. Chọn PortScan (5 samples) - Oversample nếu cần
             portscan_df = df[df[label_col].isin(portscan_labels)]
             if len(portscan_df) > 0:
-                num_portscan = min(samples_per_type, len(portscan_df))
-                portscan_samples = portscan_df.sample(n=num_portscan, random_state=42)
+                # Oversample nếu cần để có đúng 5 mẫu
+                portscan_samples = portscan_df.sample(n=samples_per_type, replace=True, random_state=42)
                 selected_samples.append(portscan_samples)
-                logger.info(f"Selected {len(portscan_samples)} PortScan samples")
+                logger.info(f"Selected {len(portscan_samples)} PortScan samples (oversampled if needed)")
             else:
                 logger.warning("Không tìm thấy PortScan samples trong dataset!")
             
@@ -333,17 +339,13 @@ def simulate_attack_from_pkl(num_samples=20, pkl_file='dataset.pkl', kafka_boots
             else:
                 logger.warning("  [X] BENIGN: NOT FOUND in selected samples")
             
-            # Kiểm tra DoS attacks - chia theo từng subtype
+            # Kiểm tra DoS attacks
             dos_found = any(label in dos_labels for label in label_counts.index)
             if dos_found:
                 dos_count = sum(count for label, count in label_counts.items() if label in dos_labels)
-                logger.info(f"  [OK] DoS attacks: {dos_count} samples (chia đều các loại)")
-                # Hiển thị từng subtype
-                for subtype_name, subtype_labels in dos_subtypes.items():
-                    subtype_count = sum(count for label, count in label_counts.items() if label in subtype_labels)
-                    if subtype_count > 0:
-                        subtype_types = [label for label in label_counts.index if label in subtype_labels]
-                        logger.info(f"    - DoS {subtype_name}: {subtype_count} samples ({', '.join(subtype_types)})")
+                dos_types = [label for label in label_counts.index if label in dos_labels]
+                logger.info(f"  [OK] DoS attacks: {dos_count} samples")
+                logger.info(f"    Types found: {', '.join(dos_types)}")
             else:
                 logger.warning("  [X] DoS attacks: NOT FOUND in selected samples")
             
@@ -438,30 +440,61 @@ def simulate_attack_from_pkl(num_samples=20, pkl_file='dataset.pkl', kafka_boots
             topic=topic,
             group_id='safenet-ids-preprocessing-group'
         )
-        
-        # Đợi một chút để đảm bảo offset đã được commit và consumer đã rejoin group
-        logger.info("Waiting for offset commit and consumer rejoin...")
-        time.sleep(2)
+
+        # RESET OFFSET CHO CNN PREPROCESSING SERVICE
+        reset_consumer_group_offset(
+            kafka_bootstrap_servers=kafka_bootstrap_servers,
+            topic=topic,
+            group_id='safenet-cnn-preprocessing-group'
+        )
+
+        # Đợi lâu hơn để đảm bảo offset đã được commit và consumer đã rejoin group
+        logger.info("Waiting for offset commit and consumer rejoin (5 seconds)...")
+        time.sleep(5)
 
         producer = NetworkDataProducer(kafka_bootstrap_servers=kafka_bootstrap_servers, topic=topic)
 
         for i, sample in enumerate(samples):
             # Cập nhật timestamp để phản ánh thời điểm gửi hiện tại
             sample['timestamp'] = datetime.now().isoformat()
-            
+
+            # Đảm bảo có ID và Label để đối chiếu
+            sample_id = sample.get('id', f"sim_{i}")
+            sample_label = sample.get('Label', sample.get('label', 'Unknown'))
+
             # Gửi dữ liệu
             producer.send_network_data(sample)
-            logger.info(f"Sent sample {i+1}/{len(samples)} to Kafka.")
-            time.sleep(0.1) # Dừng một chút giữa các lần gửi
+            logger.info(f"Sent sample {i+1}/{len(samples)} to Kafka. ID: {sample_id}, LABEL: {sample_label}")
+            time.sleep(0.2) # Dừng 0.2 giây giữa các lần gửi để đảm bảo consumer kịp xử lý
 
         producer.stop()
-        logger.info("Attack simulation completed.")
+        logger.info(f"✅ Attack simulation completed successfully! Sent {len(samples)} samples to Kafka topic '{topic}'")
+        logger.info(f"📊 Expected distribution: BENIGN:5, DoS:20, DDoS:5, PortScan:5 = Total:35 samples")
+        logger.info(f"⏱️  Services should now process these samples. Check CNN preprocessing logs for results.")
 
     except FileNotFoundError:
         logger.error(f"Error: {pkl_file} not found. Please ensure the dataset file exists.")
+        logger.info("Note: Default file is 'dataset_clean_cnn.pkl' in the project root directory.")
     except Exception as e:
         logger.error(f"An error occurred during attack simulation: {e}")
 
 if __name__ == '__main__':
+    import argparse
+
+    parser = argparse.ArgumentParser(description='Simulate Attack for IDS Testing')
+    parser.add_argument('--num-samples', type=int, default=5, help='Number of samples to simulate per attack type (and benign)')
+    parser.add_argument('--pkl-file', default='dataset.pkl', help='PKL file to load data from')
+    parser.add_argument('--kafka-servers', default='localhost:9092', help='Kafka bootstrap servers')
+    parser.add_argument('--topic', default='raw_data_event', help='Kafka topic to send data to')
+    parser.add_argument('--force-reset', action='store_true', default=True, help='Force reset consumer offset')
+
+    args = parser.parse_args()
+
     # Run simulation
-    simulate_attack_from_pkl(num_samples=20, pkl_file='dataset.pkl')
+    simulate_attack_from_pkl(
+        num_samples=args.num_samples,
+        pkl_file=args.pkl_file,
+        kafka_bootstrap_servers=args.kafka_servers,
+        topic=args.topic,
+        force_reset=args.force_reset
+    )

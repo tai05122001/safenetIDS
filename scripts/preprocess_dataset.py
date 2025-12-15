@@ -2,7 +2,14 @@
 Script tiền xử lý dataset: đọc dữ liệu đã load (pickle hoặc CSV), làm sạch và lưu lại pickle.
 
 Ví dụ chạy:
+# Cho Random Forest (mặc định):
 python scripts/preprocess_dataset.py --source dataset.pkl --output dataset_clean.pkl
+
+# Cho CNN+LSTM:
+python scripts/preprocess_dataset.py --source dataset.pkl --output dataset_clean.pkl --model-type cnn_lstm
+
+# Hoặc chỉ định rõ cho Random Forest:
+python scripts/preprocess_dataset.py --source dataset.pkl --output dataset_clean.pkl --model-type random_forest
 """
 
 from __future__ import annotations
@@ -135,6 +142,12 @@ def parse_args() -> argparse.Namespace:
         type=Path,
         default=None,
         help="(Tuỳ chọn) Lưu metadata tiền xử lý (JSON).",
+    )
+    parser.add_argument(
+        "--model-type",
+        choices=("random_forest", "cnn_lstm", "both"),
+        default="both",
+        help="Loại model sử dụng: random_forest, cnn_lstm, hoặc both (chạy cả hai). Ảnh hưởng đến việc scale và encoding.",
     )
     return parser.parse_args()
 
@@ -490,6 +503,52 @@ def resolve_path(path: Path | None) -> Path | None:
 def main() -> None:
     args = parse_args()
 
+    # Nếu model_type = "both", chạy cho cả hai loại model
+    if args.model_type == "both":
+        print("=" * 80)
+        print("🚀 CHẠY PREPROCESSING CHO CẢ HAI LOẠI MODEL")
+        print("=" * 80)
+
+        # Lưu args gốc để restore
+        original_model_type = args.model_type
+        original_output = args.output
+        original_metadata_output = args.metadata_output
+
+        # Chạy cho Random Forest
+        print("\n" + "="*60)
+        print("🔍 XỬ LÝ CHO RANDOM FOREST")
+        print("="*60)
+        args.model_type = "random_forest"
+        args.output = Path(str(original_output).replace('.pkl', '_rf.pkl'))
+        if original_metadata_output:
+            args.metadata_output = Path(str(original_metadata_output).replace('.json', '_rf.json'))
+        run_preprocessing_for_model(args)
+
+        # Chạy cho CNN+LSTM
+        print("\n" + "="*60)
+        print("🧠 XỬ LÝ CHO CNN+LSTM")
+        print("="*60)
+        args.model_type = "cnn_lstm"
+        args.output = Path(str(original_output).replace('.pkl', '_cnn.pkl'))
+        if original_metadata_output:
+            args.metadata_output = Path(str(original_metadata_output).replace('.json', '_cnn.json'))
+        run_preprocessing_for_model(args)
+
+        print("\n" + "="*80)
+        print("✅ HOÀN THÀNH PREPROCESSING CHO CẢ HAI MODEL")
+        print("="*80)
+        print(f"📄 Random Forest output: {args.output}")
+        print(f"📄 CNN+LSTM output: {args.output}")
+        return
+
+    # Chạy bình thường cho một model
+    run_preprocessing_for_model(args)
+
+
+def run_preprocessing_for_model(args) -> None:
+    """Chạy preprocessing cho một loại model cụ thể"""
+    print(f"🔧 Preprocessing cho model type: {args.model_type}")
+
     source_path = resolve_path(args.source)  # Đường dẫn dữ liệu đầu vào đã chuẩn hóa.
     fallback_csv = resolve_path(args.fallback_csv)
     output_path = resolve_path(args.output)  # Đường dẫn lưu pickle sau khi xử lý.
@@ -601,11 +660,27 @@ def main() -> None:
 
     # 11. Mã hóa one-hot để chuyển biến phân loại sang dạng số nhị phân.
     category_mapping: dict[str, list[str]] = {}
+
+    # Logic one-hot encoding phụ thuộc vào model type
+    if args.model_type == "random_forest":
+        # Random Forest: Thường cần one-hot encoding
+        if not args.one_hot:
+            print("✓ Auto-enable --one-hot cho Random Forest (cần one-hot cho categorical features)")
+            args.one_hot = True
+
+    elif args.model_type == "cnn_lstm":
+        # CNN+LSTM: Không cần one-hot, có thể xử lý categorical dưới dạng số nguyên
+        if args.one_hot:
+            print("⚠️  CNN+LSTM không cần one-hot encoding (có thể xử lý categorical dưới dạng số nguyên)")
+            print("✓ Tự động bỏ qua --one-hot cho CNN+LSTM")
+            args.one_hot = False
+        print("✓ CNN+LSTM sẽ xử lý categorical features dưới dạng số nguyên (không one-hot)")
+
     if args.one_hot:
         categorical_cols = df.select_dtypes(include=["object", "category"]).columns.difference(skip_cols)
         df, category_mapping = one_hot_encode(df, categorical_cols)
         if category_mapping:
-            print(f"Đã one-hot {len(category_mapping)} cột phân loại.")
+            print(f"✓ Đã one-hot {len(category_mapping)} cột phân loại cho {args.model_type}.")
 
     # 12. Cân bằng dữ liệu nếu được yêu cầu (oversample/undersample).
     balance_stats: dict[str, dict[str, int]] = {}  # Lưu metadata về cân bằng dữ liệu.
@@ -619,32 +694,54 @@ def main() -> None:
         )
 
     # 12. Chuẩn hóa giá trị số về cùng thang đo (Standard/MinMax) để mô hình dễ học.
-    # ⚠️ LƯU Ý QUAN TRỌNG: Model training pipeline (train_level1_rf.py, train_level2_rf.py)
-    # đã có StandardScaler trong ColumnTransformer. Nếu scale ở đây sẽ bị DOUBLE SCALING
-    # → Model sẽ scale lại data đã được scale → kết quả prediction SAI!
-    # → Nên để scale_method="none" (mặc định) và để model tự scale khi training.
     scaling_stats: dict[str, dict[str, float]] = {}
-    if args.scale_method != "none":
-        print("=" * 80)
-        print("⚠️  CẢNH BÁO NGHIÊM TRỌNG: DOUBLE SCALING DETECTED!")
-        print("=" * 80)
-        print("⚠️  Bạn đang scale data trong preprocessing!")
-        print("⚠️  Model training pipeline (train_level1_rf.py, train_level2_rf.py) đã có StandardScaler.")
-        print("⚠️  Model sẽ scale lại data đã được scale → DOUBLE SCALING!")
-        print("⚠️  Kết quả: Prediction sẽ SAI hoàn toàn!")
-        print("=" * 80)
-        print("✓ Khuyến nghị: Sử dụng --scale-method none (mặc định)")
-        print("✓ Model sẽ tự scale data khi training với StandardScaler trong pipeline")
-        print("=" * 80)
-        # Vẫn tiếp tục scale nếu user yêu cầu, nhưng cảnh báo rõ ràng
+
+    # Logic scale phụ thuộc vào model type
+    if args.model_type == "random_forest":
+        # Random Forest: Scale ở preprocessing, model sẽ không scale lại
+        if args.scale_method == "none":
+            # Auto set scale_method cho Random Forest
+            args.scale_method = "standard"
+            print("✓ Auto-set --scale-method=standard cho Random Forest (model không có internal scaler)")
         numeric_cols = df.select_dtypes(include=["number"]).columns.difference(skip_cols)
         df, scaling_stats = scale_numeric_features(df, numeric_cols, args.scale_method)
         if scaling_stats:
-            print(f"⚠️  Đã scale {len(scaling_stats)} cột theo phương pháp {args.scale_method}.")
-            print("⚠️  LƯU Ý: Model sẽ scale lại data này → DOUBLE SCALING!")
-            print("⚠️  Kết quả prediction sẽ SAI! Vui lòng retrain với --scale-method none!")
+            print(f"✓ Đã scale {len(scaling_stats)} cột theo phương pháp {args.scale_method} cho Random Forest.")
+            print("✓ Random Forest sẽ dùng data đã scale này trực tiếp.")
+
+    elif args.model_type == "cnn_lstm":
+        # CNN+LSTM: Không scale ở preprocessing, để model tự scale
+        if args.scale_method != "none":
+            print("=" * 80)
+            print("⚠️  CẢNH BÁO: DOUBLE SCALING DETECTED CHO CNN+LSTM!")
+            print("=" * 80)
+            print("⚠️  CNN+LSTM training pipeline đã có StandardScaler.")
+            print("⚠️  Nếu scale ở đây sẽ bị double scaling → kết quả prediction sai!")
+            print("=" * 80)
+            print("✓ Tự động bỏ qua scaling cho CNN+LSTM - model sẽ tự scale khi training")
+            print("=" * 80)
+        else:
+            print("✓ Không scale data trong preprocessing cho CNN+LSTM (đúng - model sẽ tự scale khi training).")
     else:
-        print("✓ Không scale data trong preprocessing (đúng - model sẽ tự scale khi training).")
+        # Fallback
+        if args.scale_method != "none":
+            print("=" * 80)
+            print("⚠️  CẢNH BÁO NGHIÊM TRỌNG: DOUBLE SCALING DETECTED!")
+            print("=" * 80)
+            print("⚠️  Model training pipeline đã có StandardScaler.")
+            print("⚠️  Nếu scale ở đây sẽ bị double scaling → kết quả prediction sai!")
+            print("=" * 80)
+            print("✓ Khuyến nghị: Sử dụng --scale-method none hoặc --model-type để chỉ định loại model")
+            print("=" * 80)
+            # Vẫn tiếp tục scale nếu user yêu cầu, nhưng cảnh báo rõ ràng
+            numeric_cols = df.select_dtypes(include=["number"]).columns.difference(skip_cols)
+            df, scaling_stats = scale_numeric_features(df, numeric_cols, args.scale_method)
+            if scaling_stats:
+                print(f"⚠️  Đã scale {len(scaling_stats)} cột theo phương pháp {args.scale_method}.")
+                print("⚠️  Model sẽ scale lại data này → DOUBLE SCALING!")
+                print("⚠️  Kết quả prediction sẽ SAI! Vui lòng retrain với --scale-method none!")
+        else:
+            print("✓ Không scale data trong preprocessing (đúng - model sẽ tự scale khi training).")
 
     if args.summary:
         print_summary(df, label_col)
@@ -675,6 +772,7 @@ def main() -> None:
         "label_mapping": label_mapping,
         "label_group_column": label_group_col,
         "label_group_mapping": label_group_mapping,
+        "model_type": args.model_type,
     }
     if label_group_encoded_mapping:
         metadata["label_group_encoded_mapping"] = label_group_encoded_mapping
