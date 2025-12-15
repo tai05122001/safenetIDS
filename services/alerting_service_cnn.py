@@ -72,6 +72,10 @@ class AlertingService:
         self.alert_stats = defaultdict(int)
         self.recent_alerts = []
 
+        # Duplicate alert prevention
+        self.alert_cooldown = {}  # attack_type -> last_alert_time
+        self.cooldown_seconds = 30  # Minimum time between alerts for same attack type
+
         # Khởi tạo database và Kafka clients
         self._init_database()
         self._init_consumer()
@@ -254,14 +258,58 @@ class AlertingService:
             else:
                 attack_type = str(label_raw).lower()
 
-        # Không tạo alert cho benign
-        if 'benign' in attack_type or attack_type == 'error' or attack_type == '':
+        # Không tạo alert cho benign hoặc unknown attacks (case insensitive)
+        if ('benign' in attack_type or
+            attack_type in ['error', '', 'unknown'] or
+            attack_type.lower() in ['unknown', 'nan']):
             return False
 
         confidence = prediction.get('confidence', 0.0)
         threshold = self.alert_thresholds.get(attack_type, self.alert_thresholds['default'])
 
         return confidence >= threshold
+
+    def _check_alert_cooldown(self, prediction: Dict[str, Any]) -> bool:
+        """
+        Check if enough time has passed since the last alert for this attack type.
+        This prevents spam alerts for the same type of attack.
+
+        Args:
+            prediction: Prediction data containing attack type info
+
+        Returns:
+            True if alert should be created, False if still in cooldown
+        """
+        # Get attack type for cooldown tracking
+        if 'predicted_attack_type' in prediction:
+            attack_type_raw = prediction.get('predicted_attack_type', 'Unknown')
+            if isinstance(attack_type_raw, str):
+                attack_type = attack_type_raw.lower()
+            elif isinstance(attack_type_raw, int):
+                attack_type_map = {0: 'dos', 1: 'ddos', 2: 'portscan'}
+                attack_type = attack_type_map.get(attack_type_raw, f'attack_type_{attack_type_raw}')
+            else:
+                attack_type = str(attack_type_raw).lower()
+        elif 'predicted_dos_variant' in prediction:
+            attack_type = prediction.get('predicted_dos_variant', 'Unknown').lower()
+        else:
+            attack_type = 'unknown'
+
+        current_time = datetime.now()
+
+        # Check cooldown
+        if attack_type in self.alert_cooldown:
+            last_alert_time = self.alert_cooldown[attack_type]
+            time_diff = (current_time - last_alert_time).total_seconds()
+
+            if time_diff < self.cooldown_seconds:
+                logger.debug(f"Alert cooldown active for {attack_type} - "
+                           f"{self.cooldown_seconds - time_diff:.1f} seconds remaining")
+                return False
+
+        # Update cooldown timestamp
+        self.alert_cooldown[attack_type] = current_time
+        return True
 
     def _extract_network_info(self, prediction_result: Dict[str, Any]) -> Dict[str, str]:
         """
@@ -579,7 +627,7 @@ class AlertingService:
                 level3_pred = prediction_result['level3_prediction']
                 attack_type = level3_pred.get('predicted_dos_variant', 'Unknown')
 
-                if self._should_create_alert(level3_pred):
+                if self._should_create_alert(level3_pred) and self._check_alert_cooldown(level3_pred):
                     # Tạo alert từ Level 3 (DoS chi tiết)
                     alert = self._create_alert(prediction_result)
 
@@ -617,7 +665,7 @@ class AlertingService:
                     logger.debug(f"DoS attack detected at Level 2 from topic '{topic_name}' - "
                                f"waiting for Level 3 detail prediction from level_3_predictions_cnn")
                 # Nếu không phải dos hoặc từ level_3_predictions (không nên xảy ra) -> tạo alert
-                elif attack_type != 'dos' and self._should_create_alert(level2_pred):
+                elif attack_type != 'dos' and self._should_create_alert(level2_pred) and self._check_alert_cooldown(level2_pred):
                     # Tạo alert từ Level 2 (ddos, portscan)
                     alert = self._create_alert(prediction_result)
 

@@ -994,6 +994,7 @@ def main():
                        help='Kafka bootstrap servers')
     parser.add_argument('--input-topic', default='raw_data_event_cnn',
                        help='Input topic name')
+    parser.add_argument('--output-topic', default='preprocess_data',
     parser.add_argument('--output-topic', default='preprocess_data_cnn',
                        help='Output topic name')
     parser.add_argument('--group-id', default='safenet-cnn-preprocessing-group',
