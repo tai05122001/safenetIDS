@@ -41,7 +41,7 @@ class CNNDataPreprocessingService:
     def __init__(self,
                  kafka_bootstrap_servers='localhost:9092',
                  input_topic='raw_data_event',
-                 output_topic='cnn_preprocess_data',
+                 output_topic='preprocess_data',
                  group_id='safenet-cnn-preprocessing-group'):
         """
         Khởi tạo CNN Data Preprocessing Service
@@ -919,7 +919,7 @@ def main():
                        help='Kafka bootstrap servers')
     parser.add_argument('--input-topic', default='raw_data_event',
                        help='Input topic name')
-    parser.add_argument('--output-topic', default='cnn_preprocess_data',
+    parser.add_argument('--output-topic', default='preprocess_data',
                        help='Output topic name')
     parser.add_argument('--group-id', default='safenet-cnn-preprocessing-group',
                        help='Consumer group ID')
