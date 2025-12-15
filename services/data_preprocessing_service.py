@@ -232,7 +232,9 @@ class DataPreprocessingService:
         df[label_col] = label_series  # Cập nhật lại cột gốc sau khi làm sạch.
         codes, uniques = pd.factorize(label_series, sort=True)  # Mã hóa nhãn thành số nguyên.
         df[f"{label_col}_encoded"] = codes  # Thêm cột nhãn đã mã hóa.
-        mapping = {code: label for code, label in enumerate(uniques)}  # Bảng tra cứu để giải mã lại.
+        # Ensure mapping uses pure Python types
+        uniques_list = [str(label) for label in uniques]  # Convert to list of strings
+        mapping = {int(code): uniques_list[code] for code in range(len(uniques_list))}  # Bảng tra cứu để giải mã lại.
         return df, mapping
 
     @staticmethod
@@ -269,9 +271,9 @@ class DataPreprocessingService:
         cleaned_series = df[source_col].astype(str).str.strip()
         # Xây dựng mapping thực tế từ nhãn gốc -> nhóm.
         for original_label in cleaned_series.unique():
-            normalized = original_label.lower()
+            normalized = str(original_label).lower()
             group_name = group_rules.get(normalized, default_group)
-            mapping_report[original_label] = group_name
+            mapping_report[str(original_label)] = group_name
 
         group_series = cleaned_series.map(mapping_report)
         df[group_col] = group_series  # Gán vào DataFrame.
@@ -554,17 +556,19 @@ class DataPreprocessingService:
             if self.model_type == "random_forest":
                 # Random Forest: Scale ở preprocessing vì model không có internal scaler
                 logger.info("Scale data cho Random Forest (model không có internal scaler)")
-                scaling_stats = self.scale_numeric_features(df, numeric_cols, "standard")
+                df, scaling_stats = self.scale_numeric_features(df, numeric_cols, "standard")
                 if scaling_stats:
                     logger.info(f"Đã scale {len(scaling_stats)} cột theo standard scaling cho Random Forest")
 
             elif self.model_type == "cnn_lstm":
                 # CNN+LSTM: Không scale ở preprocessing vì model có StandardScaler trong pipeline
                 logger.info("Bỏ qua scaling cho CNN+LSTM - Model sẽ tự scale khi predict")
+                scaling_stats = {}  # Empty dict for CNN+LSTM
 
             else:
                 # Default: Không scale để an toàn
                 logger.info(f"Bỏ qua scaling cho {self.model_type} - Model sẽ tự scale khi predict")
+                scaling_stats = {}  # Empty dict for default
 
             # Debug: Log số lượng features sau preprocessing
             numeric_features = df.select_dtypes(include=["number"]).columns.difference(skip_cols)
@@ -577,22 +581,54 @@ class DataPreprocessingService:
                 attack_type_val = df.get(attack_type_col, 'N/A').iloc[0] if attack_type_col in df.columns else 'N/A'
                 logger.info(f"Processed record - Label: {label_val}, Label group: {label_group_val}, Binary: {binary_val}, Attack type: {attack_type_val}")
             
-            # Chuyển về dictionary
-            processed_record = df.iloc[0].to_dict()
+            # Chuyển về dictionary và convert tất cả pandas/numpy types thành Python native types
+            def convert_to_json_serializable(obj):
+                """Convert pandas/numpy objects to JSON serializable Python types"""
+                if isinstance(obj, (np.integer, np.int64, np.int32)):
+                    return int(obj)
+                elif isinstance(obj, (np.floating, np.float64, np.float32)):
+                    return float(obj)
+                elif isinstance(obj, np.ndarray):
+                    return obj.tolist()
+                elif hasattr(obj, 'tolist'):  # pandas Index, Series, etc.
+                    try:
+                        return obj.tolist()
+                    except:
+                        return str(obj)
+                elif isinstance(obj, dict):
+                    return {k: convert_to_json_serializable(v) for k, v in obj.items()}
+                elif isinstance(obj, list):
+                    return [convert_to_json_serializable(item) for item in obj]
+                elif pd.isna(obj):
+                    return None
+                else:
+                    return obj
+
+            processed_record = {k: convert_to_json_serializable(v) for k, v in df.iloc[0].to_dict().items()}
 
             # Thêm metadata preprocessing
             processed_record['preprocessing_timestamp'] = datetime.now().isoformat()
+
+            # Ensure all metadata components are JSON serializable first
+            safe_label_mapping = convert_to_json_serializable(label_mapping)
+            safe_label_group_mapping = convert_to_json_serializable(label_group_mapping)
+            safe_label_group_encoded_mapping = convert_to_json_serializable(label_group_encoded_mapping)
+            safe_clip_stats = convert_to_json_serializable(clip_stats)
+            safe_scaling_stats = convert_to_json_serializable(scaling_stats)  # Ensure JSON serializable
+            safe_constant_columns_dropped = convert_to_json_serializable(constant_dropped)
+
             preprocessing_metadata = {
                 'model_type': self.model_type,
-                'label_mapping': label_mapping,
-                'label_group_mapping': label_group_mapping,
-                'label_group_encoded_mapping': label_group_encoded_mapping,
-                'clip_stats': clip_stats,
-                'scaling_stats': scaling_stats,
-                'constant_columns_dropped': constant_dropped,
-                'processed_columns': list(df.columns),
+                'label_mapping': safe_label_mapping,
+                'label_group_mapping': safe_label_group_mapping,
+                'label_group_encoded_mapping': safe_label_group_encoded_mapping,
+                'clip_stats': safe_clip_stats,
+                'scaling_stats': safe_scaling_stats,
+                'constant_columns_dropped': safe_constant_columns_dropped,
+                'processed_columns': [str(col) for col in df.columns],
                 'numeric_features_count': len(numeric_features)
             }
+
             # Thêm thông tin về binary và attack type labels nếu có
             if binary_col in df.columns:
                 preprocessing_metadata['binary_label_column'] = binary_col
@@ -600,6 +636,7 @@ class DataPreprocessingService:
             if attack_type_col in df.columns:
                 preprocessing_metadata['attack_type_label_column'] = attack_type_col
                 preprocessing_metadata['attack_type_label_value'] = int(df[attack_type_col].iloc[0]) if pd.notna(df[attack_type_col].iloc[0]) else None
+
             processed_record['preprocessing_metadata'] = preprocessing_metadata
 
             return processed_record
@@ -609,7 +646,25 @@ class DataPreprocessingService:
             # Trả về record gốc với flag error
             record['preprocessing_error'] = str(e)
             record['preprocessing_timestamp'] = datetime.now().isoformat()
-            return record
+            # Ensure record is JSON serializable
+            def convert_to_json_serializable(obj):
+                """Convert pandas/numpy objects to JSON serializable Python types"""
+                if isinstance(obj, (np.integer, np.int64, np.int32)):
+                    return int(obj)
+                elif isinstance(obj, (np.floating, np.float64, np.float32)):
+                    return float(obj)
+                elif isinstance(obj, np.ndarray):
+                    return obj.tolist()
+                elif isinstance(obj, dict):
+                    return {k: convert_to_json_serializable(v) for k, v in obj.items()}
+                elif isinstance(obj, list):
+                    return [convert_to_json_serializable(item) for item in obj]
+                elif pd.isna(obj):
+                    return None
+                else:
+                    return obj
+
+            return {k: convert_to_json_serializable(v) for k, v in record.items()}
 
     def send_processed_data(self, data: Dict[str, Any], original_key: str = None):
         """
@@ -622,6 +677,15 @@ class DataPreprocessingService:
         try:
             key = original_key or data.get('timestamp', str(datetime.now().timestamp()))
 
+            # Validate JSON serialization before sending
+            try:
+                import json
+                json.dumps(data)
+            except TypeError as json_error:
+                logger.error(f"JSON serialization error: {json_error}")
+                logger.error("Skipping message due to serialization issue")
+                return  # Don't send if serialization fails
+
             future = self.producer.send(self.output_topic, value=data, key=key)
             record_metadata = future.get(timeout=10)
 
@@ -631,6 +695,18 @@ class DataPreprocessingService:
 
         except Exception as e:
             logger.error(f"Failed to send processed data: {e}")
+            # Log the problematic data structure
+            import json
+            try:
+                json.dumps(data)
+            except Exception as json_error:
+                logger.error(f"JSON serialization failed: {json_error}")
+                # Try to identify the problematic part
+                for k, v in data.items():
+                    try:
+                        json.dumps(v)
+                    except:
+                        logger.error(f"Problematic field: {k} = {type(v)}")
 
     def start_processing(self):
         """Bắt đầu quá trình xử lý dữ liệu"""

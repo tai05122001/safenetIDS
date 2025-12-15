@@ -69,7 +69,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--source-dataset",
         type=Path,
-        default=Path("dataset_clean.pkl"),
+        default=Path("dataset_clean_rf.pkl"),
         help="Dataset nguồn dùng để split level 1 nếu chưa có (mặc định: dataset_clean.pkl).",
     )
     parser.add_argument(
@@ -441,7 +441,7 @@ def run_training_pipeline(
     setup_logging()
 
     script_dir = Path(__file__).resolve().parent
-    project_root = script_dir.parent
+    project_root = script_dir.parent.parent
 
     resolved_splits_dir = Path(splits_dir)
     if not resolved_splits_dir.is_absolute():

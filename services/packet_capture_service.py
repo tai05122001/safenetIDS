@@ -846,18 +846,37 @@ class RealTimePacketCapture:
     def _send_to_kafka(self, features):
         """Gửi flow features đến Kafka và flush ngay lập tức"""
         try:
-            key = features.get('timestamp', str(time.time()))
-            future = self.producer.send(self.topic, value=features, key=key)
+            # Convert numpy/pandas types to JSON serializable Python types
+            def convert_to_json_serializable(obj):
+                """Convert pandas/numpy objects to JSON serializable Python types"""
+                if isinstance(obj, (np.integer, np.int64, np.int32)):
+                    return int(obj)
+                elif isinstance(obj, (np.floating, np.float64, np.float32)):
+                    return float(obj)
+                elif isinstance(obj, np.ndarray):
+                    return obj.tolist()
+                elif isinstance(obj, dict):
+                    return {k: convert_to_json_serializable(v) for k, v in obj.items()}
+                elif isinstance(obj, list):
+                    return [convert_to_json_serializable(item) for item in obj]
+                else:
+                    return obj
+
+            # Ensure all values are JSON serializable
+            serializable_features = {k: convert_to_json_serializable(v) for k, v in features.items()}
+
+            key = serializable_features.get('timestamp', str(time.time()))
+            future = self.producer.send(self.topic, value=serializable_features, key=key)
             record_metadata = future.get(timeout=10)
-            
+
             # Flush ngay để đảm bảo message được gửi đến Kafka broker ngay lập tức
             self.producer.flush(timeout=1)
-            
-            logger.info(f"Flow sent: {features['source_ip']}:{features['source_port']} -> "
-                       f"{features['destination_ip']}:{features['destination_port']} "
-                       f"(protocol: {features['protocol']}, "
-                       f"packets: {features['total_fwd_packets'] + features['total_backward_packets']}, "
-                       f"bytes: {features['total_length_of_fwd_packets'] + features['total_length_of_bwd_packets']})")
+
+            logger.info(f"Flow sent: {serializable_features['source_ip']}:{serializable_features['source_port']} -> "
+                       f"{serializable_features['destination_ip']}:{serializable_features['destination_port']} "
+                       f"(protocol: {serializable_features['protocol']}, "
+                       f"packets: {serializable_features['total_fwd_packets'] + serializable_features['total_backward_packets']}, "
+                       f"bytes: {serializable_features['total_length_of_fwd_packets'] + serializable_features['total_length_of_bwd_packets']})")
         except Exception as e:
             logger.error(f"Failed to send to Kafka: {e}")
     
