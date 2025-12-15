@@ -40,8 +40,8 @@ class CNNDataPreprocessingService:
 
     def __init__(self,
                  kafka_bootstrap_servers='localhost:9092',
-                 input_topic='raw_data_event',
-                 output_topic='cnn_preprocess_data',
+                 input_topic='raw_data_event_cnn',
+                 output_topic='preprocess_data_cnn',
                  group_id='safenet-cnn-preprocessing-group'):
         """
         Khởi tạo CNN Data Preprocessing Service
@@ -347,31 +347,43 @@ class CNNDataPreprocessingService:
         return mapping
 
     def _init_scaler(self):
-        """Khởi tạo scaler cho CNN preprocessing"""
+        """Khởi tạo scaler cho CNN preprocessing - BẮT BUỘC phải load scaler đã trained"""
         try:
-            # Load scaler từ Level 1 CNN artifacts (nếu có)
+            # Load scaler từ Level 1 CNN artifacts (BẮT BUỘC)
             scaler_path = Path("artifacts_cnn/scaler.joblib")
-            if scaler_path.exists():
-                self.scaler = joblib.load(scaler_path)
-                logger.info("Loaded scaler from Level 1 CNN artifacts")
-            else:
-                # Tạo scaler mới nếu chưa có
-                self.scaler = StandardScaler()
-                logger.info("Created new StandardScaler for CNN preprocessing")
+            if not scaler_path.exists():
+                error_msg = f"❌ CRITICAL: Scaler file not found at {scaler_path}! Cannot proceed without trained scaler."
+                logger.error(error_msg)
+                raise FileNotFoundError(error_msg)
+            
+            self.scaler = joblib.load(scaler_path)
+            logger.info("✅ Loaded scaler from Level 1 CNN artifacts")
+            
+            # Verify scaler is fitted
+            if not hasattr(self.scaler, 'mean_') or self.scaler.mean_ is None:
+                error_msg = "❌ CRITICAL: Scaler loaded but NOT fitted! Cannot use unfitted scaler."
+                logger.error(error_msg)
+                raise ValueError(error_msg)
+            
+            logger.info(f"✅ Scaler is fitted: {len(self.scaler.mean_)} features")
+            logger.info(f"   Scaler mean range: [{self.scaler.mean_.min():.2f}, {self.scaler.mean_.max():.2f}]")
+            logger.info(f"   Scaler scale range: [{self.scaler.scale_.min():.2f}, {self.scaler.scale_.max():.2f}]")
 
             # Load label encoder từ Level 1
             le_path = Path("artifacts_cnn/label_encoder.joblib")
             if le_path.exists():
                 self.label_encoder = joblib.load(le_path)
-                logger.info("Loaded label encoder from Level 1 CNN artifacts")
+                logger.info("✅ Loaded label encoder from Level 1 CNN artifacts")
             else:
+                # Label encoder không quan trọng bằng scaler, có thể tạo mới
                 self.label_encoder = LabelEncoder()
-                logger.info("Created new LabelEncoder for CNN preprocessing")
+                logger.warning("⚠️  Label encoder not found, created new one (not critical)")
 
         except Exception as e:
-            logger.error(f"Failed to initialize scaler: {e}")
-            self.scaler = StandardScaler()
-            self.label_encoder = LabelEncoder()
+            logger.error(f"❌ FATAL: Failed to initialize scaler: {e}")
+            import traceback
+            logger.error(traceback.format_exc())
+            raise  # Dừng service nếu không load được scaler
 
     def _init_kafka(self):
         """Khởi tạo Kafka consumer và producer"""
@@ -383,7 +395,7 @@ class CNNDataPreprocessingService:
                 group_id=self.group_id,
                 value_deserializer=lambda x: json.loads(x.decode('utf-8')),
                 key_deserializer=lambda x: x.decode('utf-8') if x else None,
-                auto_offset_reset='latest',  # Khởi tạo group mới sẽ đọc từ message mới nhất
+                auto_offset_reset='earliest',  # Đọc toàn bộ backlog để không bỏ lỡ message
                 enable_auto_commit=True,
                 auto_commit_interval_ms=1000,
                 session_timeout_ms=30000,
@@ -505,40 +517,91 @@ class CNNDataPreprocessingService:
         Sử dụng đúng feature names và thứ tự như training data
         """
         features = {}
+        found_count = 0
+        missing_count = 0
+        missing_features = []
 
         if self.feature_columns and self.processed_to_raw_mapping:
             # Sử dụng feature columns từ training metadata - đảm bảo thứ tự ĐÚNG
             for processed_name in self.feature_columns:
-                # Lấy raw name tương ứng
+                # Thử nhiều cách để tìm feature:
+                # 1. Tìm raw name (có spaces) - cho data từ simulate_attack_service
+                # 2. Tìm processed name trực tiếp (snake_case) - cho data từ packet_capture_service
+                # 3. Nếu không tìm thấy, set = 0
                 raw_name = self.processed_to_raw_mapping.get(processed_name)
-
+                value = None
+                found_in_raw = False
+                
+                # Thử 1: Tìm raw format (có spaces) - cho data từ simulate_attack_service
                 if raw_name and raw_name in data:
                     value = data[raw_name]
+                    found_in_raw = True
+                # Thử 2: Tìm processed format trực tiếp (snake_case) - cho data từ packet_capture_service
+                elif processed_name in data:
+                    value = data[processed_name]
+                    found_in_raw = False
+                
+                if value is not None:
                     # Convert to float, handle inf/-inf/nan, also handle string numbers
                     try:
                         if isinstance(value, str):
                             # Handle string numbers like "80"
                             if value.strip() == '':
                                 features[processed_name] = 0.0
+                                missing_count += 1
+                                missing_features.append(processed_name)
                             else:
                                 numeric_value = float(value)
                                 if np.isinf(numeric_value) or np.isnan(numeric_value):
                                     features[processed_name] = 0.0
+                                    missing_count += 1
+                                    missing_features.append(processed_name)
                                 else:
                                     features[processed_name] = numeric_value
+                                    found_count += 1
                         elif isinstance(value, (int, float)):
                             if np.isinf(value) or np.isnan(value):
                                 features[processed_name] = 0.0
+                                missing_count += 1
+                                missing_features.append(processed_name)
                             else:
                                 features[processed_name] = float(value)
+                                found_count += 1
                         else:
                             features[processed_name] = 0.0
+                            missing_count += 1
+                            missing_features.append(processed_name)
                     except (ValueError, TypeError):
                         # If conversion fails, set to 0.0
                         features[processed_name] = 0.0
+                        missing_count += 1
+                        missing_features.append(processed_name)
                 else:
                     # Nếu feature không có trong data, set = 0
                     features[processed_name] = 0.0
+                    missing_count += 1
+                    missing_features.append(processed_name)
+            
+            # Log feature extraction statistics (only for first few records to avoid spam)
+            if self.processed_count < 5:
+                logger.info(f"FEATURE EXTRACTION | Found: {found_count}/{len(self.feature_columns)} | Missing: {missing_count}/{len(self.feature_columns)}")
+                if missing_count > 0 and len(missing_features) <= 10:
+                    logger.info(f"Missing features: {missing_features[:10]}")
+                elif missing_count > 0:
+                    logger.info(f"Missing features (first 10): {missing_features[:10]}...")
+                
+                # Log sample of found features để verify format
+                if found_count > 0:
+                    sample_features = [fname for fname in self.feature_columns if fname in features and features[fname] != 0.0][:5]
+                    if sample_features:
+                        logger.info(f"Sample found features: {sample_features}")
+                        # Check if data uses raw or processed format
+                        first_feature = sample_features[0]
+                        raw_name = self.processed_to_raw_mapping.get(first_feature)
+                        if raw_name and raw_name in data:
+                            logger.info(f"Data format: RAW (with spaces) - e.g., '{raw_name}' found")
+                        elif first_feature in data:
+                            logger.info(f"Data format: PROCESSED (snake_case) - e.g., '{first_feature}' found")
         else:
             # This should never happen now with hardcoded fallback, but keeping for safety
             logger.error("No feature columns available - this should not happen")
@@ -625,16 +688,69 @@ class CNNDataPreprocessingService:
 
         # Handle NaN/Inf
         X = np.nan_to_num(X, nan=0.0, posinf=0.0, neginf=0.0)
+        
+        # CRITICAL FIX: Clip extreme values BEFORE scaling
+        # Problem: Scaler was trained on data with extreme values (mean up to 18M, scale up to 36M)
+        # This happens because training data had Inf values converted to very large numbers
+        # Solution: Clip to match training data distribution (which also had extreme values)
+        # 
+        # Analysis of scaler statistics:
+        # - Mean range: -2264 to 18,081,024
+        # - Scale range: 0.01 to 36,317,791
+        # This means some features in training had values up to ~100M
+        #
+        # We clip to 100M to match training distribution
+        CLIP_THRESHOLD = 1e8  # 100 million - matches training data range
+        if np.any(np.abs(X) > CLIP_THRESHOLD):
+            extreme_count = np.sum(np.abs(X) > CLIP_THRESHOLD)
+            logger.warning(f"⚠️ Clipping {extreme_count} extreme values (threshold: {CLIP_THRESHOLD:.0f})")
+            X = np.clip(X, -CLIP_THRESHOLD, CLIP_THRESHOLD)
+        
+        # Log raw features before scaling (for first 10 records to debug)
+        if self.processed_count < 10:
+            logger.info(f"RAW FEATURES DEBUG | Record #{self.processed_count} | Min: {X.min():.6f} | Max: {X.max():.6f} | Mean: {X.mean():.6f} | Std: {X.std():.6f}")
+            # Log some sample feature values (especially high-value features)
+            sample_indices = [0, 10, 20, 30, 50, 70]  # Sample features
+            sample_features = [self.feature_columns[i] if i < len(self.feature_columns) else f"feature_{i}" for i in sample_indices]
+            sample_values = [X[0, i] if i < X.shape[1] else 0 for i in sample_indices]
+            logger.info(f"Sample raw features: {dict(zip(sample_features, [f'{v:.2f}' for v in sample_values]))}")
+            
+            # Check for extreme values
+            if abs(X.max()) > 1000000 or abs(X.min()) > 1000000:
+                logger.warning(f"⚠️ EXTREME RAW VALUES DETECTED! Max: {X.max():.2f}, Min: {X.min():.2f}")
+                # Find which features have extreme values
+                extreme_indices = np.where(np.abs(X[0]) > 1000000)[0]
+                if len(extreme_indices) > 0:
+                    extreme_features = [self.feature_columns[i] if i < len(self.feature_columns) else f"feature_{i}" for i in extreme_indices[:10]]
+                    extreme_values = [X[0, i] for i in extreme_indices[:10]]
+                    logger.warning(f"Extreme value features: {dict(zip(extreme_features, [f'{v:.2f}' for v in extreme_values]))}")
 
-        # Scale features
-        if self.scaler:
-            try:
-                X_scaled = self.scaler.transform(X)
-            except:
-                # Fit scaler if not fitted
-                X_scaled = self.scaler.fit_transform(X)
-        else:
-            X_scaled = X
+        # Scale features - scaler PHẢI đã được fitted
+        if not self.scaler or not hasattr(self.scaler, 'mean_') or self.scaler.mean_ is None:
+            error_msg = "❌ FATAL: Scaler not available or not fitted! Cannot scale features."
+            logger.error(error_msg)
+            raise ValueError(error_msg)
+        
+        try:
+            X_scaled = self.scaler.transform(X)
+        except Exception as e:
+            logger.error(f"❌ Error scaling features: {e}")
+            raise
+        
+        # Log scaled features (for first 10 records to debug)
+        if self.processed_count < 10:
+            logger.info(f"SCALED FEATURES DEBUG | Record #{self.processed_count} | Min: {X_scaled.min():.6f} | Max: {X_scaled.max():.6f} | Mean: {X_scaled.mean():.6f} | Std: {X_scaled.std():.6f}")
+            # Verify scaler statistics
+            if self.scaler and hasattr(self.scaler, 'mean_') and self.scaler.mean_ is not None:
+                logger.info(f"Scaler stats: mean range [{self.scaler.mean_.min():.2f}, {self.scaler.mean_.max():.2f}], scale range [{self.scaler.scale_.min():.2f}, {self.scaler.scale_.max():.2f}]")
+            
+            # Check if scaling worked correctly (StandardScaler should produce mean≈0, std≈1)
+            if abs(X_scaled.mean()) > 10 or X_scaled.std() > 10:
+                logger.warning(f"⚠️ SCALING MAY BE INCORRECT! Scaled mean: {X_scaled.mean():.2f}, std: {X_scaled.std():.2f} (expected: mean≈0, std≈1)")
+                logger.warning(f"   Raw mean: {X.mean():.2f}, std: {X.std():.2f}")
+                if self.scaler and hasattr(self.scaler, 'mean_') and self.scaler.mean_ is not None:
+                    logger.warning(f"   Scaler was fitted with mean range: [{self.scaler.mean_.min():.2f}, {self.scaler.mean_.max():.2f}]")
+                    logger.warning(f"   This suggests features from packet_capture may have very different ranges than training data!")
 
         # Reshape cho CNN 1D: (batch_size, timesteps=1, features)
         X_reshaped = X_scaled.reshape(X_scaled.shape[0], 1, X_scaled.shape[1])
@@ -662,11 +778,24 @@ class CNNDataPreprocessingService:
                 logger.warning(f"No features extracted from record {record_id}")
                 return None
 
-            # Encode labels
-            label_info = self._encode_labels(record.get(' Label', 'Unknown'))
+            # Encode labels - try multiple possible label column names
+            label = None
+            possible_label_keys = [' Label', 'Label', 'label', 'label_encoded', 'label_group']
+            for key in possible_label_keys:
+                if key in record:
+                    label = record[key]
+                    break
+            if label is None:
+                label = 'Unknown'
+                logger.warning(f"Could not find label in record {record_id}, using 'Unknown'")
+            label_info = self._encode_labels(label)
 
             # Preprocess cho CNN
             cnn_features = self._preprocess_for_cnn(raw_features)
+            
+            # Log feature statistics for debugging
+            cnn_features_array = np.array(cnn_features)
+            logger.info(f"PREPROCESS DEBUG | Record {record_id} | Label: {label_info['original_label']} | Binary: {label_info['binary_label']} | Group: {label_info['group']} | Features shape: {cnn_features_array.shape} | Min: {cnn_features_array.min():.6f} | Max: {cnn_features_array.max():.6f} | Mean: {cnn_features_array.mean():.6f} | Std: {cnn_features_array.std():.6f}")
 
             # Tạo processed record
             processed_record = {
@@ -749,82 +878,28 @@ class CNNDataPreprocessingService:
 
         logger.info("Reset statistics counters - starting fresh count")
 
-        # Reset offset về cuối topic để chỉ đọc message mới (giống data_preprocessing_service.py)
-        try:
-            logger.info("Resetting consumer offset to end of topic to skip old messages...")
-            self.consumer.poll(timeout_ms=1000)
-            partitions = self.consumer.assignment()
-
-            if partitions:
-                self.service_start_time = datetime.now()
-                logger.info(f"Service ready time (before seek to end): {self.service_start_time.isoformat()}")
-                self.consumer.seek_to_end(*partitions)
-                logger.info(f"Seeked to end for {len(partitions)} partitions - will only process new messages")
-                self.last_partition_assignment = partitions.copy()
-            else:
-                logger.warning("No partitions assigned yet, offset reset skipped")
-                self.last_partition_assignment = set()
-                self.service_start_time = datetime.now()
-        except Exception as e:
-            logger.warning(f"Failed to reset offset to end: {e}. Continuing with default offset behavior...")
-            self.last_partition_assignment = set()
-            self.service_start_time = datetime.now()
+        # Đọc toàn bộ backlog, không seek_to_end (giống level1_prediction_service_cnn.py)
+        self.service_start_time = datetime.now()
+        self.last_partition_assignment = set()
+        logger.info(f"Service started at: {self.service_start_time.isoformat()}")
+        logger.info("Will process all messages in backlog (no seek_to_end)")
 
         try:
             for message in self.consumer:
-                # Kiểm tra nếu partition assignment thay đổi (rebalance) và seek_to_end
+                # Kiểm tra nếu partition assignment thay đổi (rebalance) - không seek_to_end
                 current_assignment = self.consumer.assignment()
                 if current_assignment != self.last_partition_assignment:
                     if current_assignment:
-                        logger.info(f"Partition assignment changed (rebalance detected). Seeking to end for {len(current_assignment)} partitions...")
-                        try:
-                            self.service_start_time = datetime.now()
-                            self.first_message_timestamp = None
-                            logger.info(f"Updated service ready time after rebalance: {self.service_start_time.isoformat()}, reset first_message_timestamp")
-                            self.consumer.seek_to_end(*current_assignment)
-                            logger.info(f"Seeked to end after rebalance - will only process new messages")
-                        except Exception as e:
-                            logger.warning(f"Failed to seek to end after rebalance: {e}")
+                        logger.info(f"Partition assignment changed (rebalance detected). Continue consuming (no seek_to_end).")
+                        self.service_start_time = datetime.now()
+                        self.first_message_timestamp = None
                     self.last_partition_assignment = current_assignment.copy() if current_assignment else set()
 
                 try:
                     raw_data = message.value
                     original_key = message.key
 
-                    # Lọc message theo timestamp (bỏ message cũ) giống data_preprocessing_service.py
-                    if isinstance(raw_data, dict) and 'timestamp' in raw_data and self.service_start_time:
-                        try:
-                            msg_ts_str = str(raw_data['timestamp'])
-                            if 'T' in msg_ts_str:
-                                msg_ts_clean = msg_ts_str.split('+')[0].split('Z')[0]
-                                try:
-                                    msg_dt = datetime.fromisoformat(msg_ts_clean)
-                                    buffer_time = self.service_start_time - timedelta(seconds=5)
-
-                                    if msg_dt < buffer_time:
-                                        logger.info(f"SKIPPING old message - msg_ts: {raw_data['timestamp']}, service_ready: {self.service_start_time.isoformat()}, diff: {(buffer_time - msg_dt).total_seconds():.2f}s")
-                                        try:
-                                            self.consumer.commit()
-                                        except:
-                                            pass
-                                        continue
-                                    else:
-                                        if self.first_message_timestamp is None:
-                                            self.first_message_timestamp = msg_dt
-                                            logger.info(f"First message timestamp set: {self.first_message_timestamp.isoformat()}")
-                                        elif msg_dt < self.first_message_timestamp:
-                                            logger.info(f"SKIPPING message before first message - msg_ts: {raw_data['timestamp']}, first_msg_ts: {self.first_message_timestamp.isoformat()}")
-                                            try:
-                                                self.consumer.commit()
-                                            except:
-                                                pass
-                                            continue
-                                        logger.debug(f"Processing new message - msg_ts: {raw_data['timestamp']}, service_ready: {self.service_start_time.isoformat()}")
-                                except ValueError:
-                                    logger.debug(f"Could not parse message timestamp format: {msg_ts_clean}, processing anyway")
-                        except Exception as e:
-                            logger.debug(f"Could not compare message timestamp: {e}, processing anyway")
-
+                    # Không lọc message theo timestamp - xử lý tất cả message (giống level1_prediction_service_cnn.py)
                     logger.info(f"Processing record with key: {original_key}")
 
                     processed_data = self.process_record(raw_data)
@@ -917,9 +992,9 @@ def main():
     parser = argparse.ArgumentParser(description='CNN Data Preprocessing Service')
     parser.add_argument('--kafka-servers', default='localhost:9092',
                        help='Kafka bootstrap servers')
-    parser.add_argument('--input-topic', default='raw_data_event',
+    parser.add_argument('--input-topic', default='raw_data_event_cnn',
                        help='Input topic name')
-    parser.add_argument('--output-topic', default='cnn_preprocess_data',
+    parser.add_argument('--output-topic', default='preprocess_data_cnn',
                        help='Output topic name')
     parser.add_argument('--group-id', default='safenet-cnn-preprocessing-group',
                        help='Consumer group ID')

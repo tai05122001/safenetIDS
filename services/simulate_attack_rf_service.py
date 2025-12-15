@@ -64,15 +64,15 @@ logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     handlers=[
-        logging.FileHandler('services/logs/simulate_attack.log', encoding='utf-8'),
+        logging.FileHandler('services/logs/simulate_attack_rf.log', encoding='utf-8'),
         SafeStreamHandler()
     ]
 )
-logger = logging.getLogger('SimulateAttack')
+logger = logging.getLogger('SimulateAttackRF')
 
 def reset_consumer_group_offset(kafka_bootstrap_servers='localhost:9092', 
-                                topic='raw_data_event',
-                                group_id='safenet-ids-preprocessing-group'):
+                                topic='raw_data_event_rf',
+                                group_id='safenet-rf-preprocessing-group'):
     """
     Reset offset của consumer group về cuối topic để đảm bảo chỉ đọc dữ liệu mới
     
@@ -176,7 +176,7 @@ def reset_consumer_group_offset(kafka_bootstrap_servers='localhost:9092',
         logger.error(traceback.format_exc())
         logger.warning("Continuing without offset reset - consumer may read old messages")
 
-def simulate_attack_from_pkl(num_samples=5, pkl_file='dataset.pkl', kafka_bootstrap_servers='localhost:9092', topic='raw_data_event', force_reset=True):
+def simulate_attack_from_pkl(num_samples=5, pkl_file='dataset.pkl', kafka_bootstrap_servers='localhost:9092', topic='raw_data_event_rf', force_reset=True):
     """
     Tải dữ liệu từ dataset.pkl, chọn các mẫu đại diện cho tất cả loại tấn công
     để đảm bảo cả Level 1 và Level 2 model đều có thể hoạt động.
@@ -374,7 +374,7 @@ def simulate_attack_from_pkl(num_samples=5, pkl_file='dataset.pkl', kafka_bootst
             # Summary về prediction flow
             logger.info("")
             logger.info("=" * 60)
-            logger.info("PREDICTION SUMMARY: Expected prediction flow:")
+            logger.info("PREDICTION SUMMARY: Expected prediction flow (Random Forest):")
             logger.info("=" * 60)
             
             # Mapping từ label sang label_group (theo logic trong preprocess_dataset.py)
@@ -438,14 +438,7 @@ def simulate_attack_from_pkl(num_samples=5, pkl_file='dataset.pkl', kafka_bootst
         reset_consumer_group_offset(
             kafka_bootstrap_servers=kafka_bootstrap_servers,
             topic=topic,
-            group_id='safenet-ids-preprocessing-group'
-        )
-
-        # RESET OFFSET CHO CNN PREPROCESSING SERVICE
-        reset_consumer_group_offset(
-            kafka_bootstrap_servers=kafka_bootstrap_servers,
-            topic=topic,
-            group_id='safenet-cnn-preprocessing-group'
+            group_id='safenet-rf-preprocessing-group'
         )
 
         # Đợi lâu hơn để đảm bảo offset đã được commit và consumer đã rejoin group
@@ -470,22 +463,22 @@ def simulate_attack_from_pkl(num_samples=5, pkl_file='dataset.pkl', kafka_bootst
         producer.stop()
         logger.info(f"✅ Attack simulation completed successfully! Sent {len(samples)} samples to Kafka topic '{topic}'")
         logger.info(f"📊 Expected distribution: BENIGN:5, DoS:20, DDoS:5, PortScan:5 = Total:35 samples")
-        logger.info(f"⏱️  Services should now process these samples. Check CNN preprocessing logs for results.")
+        logger.info(f"⏱️  Random Forest services should now process these samples. Check RF preprocessing logs for results.")
 
     except FileNotFoundError:
         logger.error(f"Error: {pkl_file} not found. Please ensure the dataset file exists.")
-        logger.info("Note: Default file is 'dataset_clean_cnn.pkl' in the project root directory.")
+        logger.info("Note: Default file is 'dataset.pkl' in the project root directory.")
     except Exception as e:
         logger.error(f"An error occurred during attack simulation: {e}")
 
 if __name__ == '__main__':
     import argparse
 
-    parser = argparse.ArgumentParser(description='Simulate Attack for IDS Testing')
+    parser = argparse.ArgumentParser(description='Simulate Attack for IDS Testing (Random Forest)')
     parser.add_argument('--num-samples', type=int, default=5, help='Number of samples to simulate per attack type (and benign)')
     parser.add_argument('--pkl-file', default='dataset.pkl', help='PKL file to load data from')
     parser.add_argument('--kafka-servers', default='localhost:9092', help='Kafka bootstrap servers')
-    parser.add_argument('--topic', default='raw_data_event', help='Kafka topic to send data to')
+    parser.add_argument('--topic', default='raw_data_event_rf', help='Kafka topic to send data to')
     parser.add_argument('--force-reset', action='store_true', default=True, help='Force reset consumer offset')
 
     args = parser.parse_args()

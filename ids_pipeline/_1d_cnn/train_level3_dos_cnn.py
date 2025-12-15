@@ -217,7 +217,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--split-script",
         type=Path,
-        default=Path("../scripts/split_dataset.py"),
+        default=Path("scripts/split_dataset.py"),
         help="Đường dẫn script split_dataset.py.",
     )
 

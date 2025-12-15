@@ -442,7 +442,7 @@ def run_training_pipeline(
     setup_logging()
 
     script_dir = Path(__file__).resolve().parent
-    project_root = script_dir.parent.parent
+    project_root = script_dir.parent
 
     resolved_splits_dir = Path(splits_dir)
     if not resolved_splits_dir.is_absolute():

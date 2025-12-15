@@ -357,7 +357,7 @@ def run_training_pipeline(
     setup_logging()
 
     script_dir = Path(__file__).resolve().parent
-    project_root = script_dir.parent.parent
+    project_root = script_dir.parent
 
     splits_path = Path(splits_dir)
     if not splits_path.is_absolute():

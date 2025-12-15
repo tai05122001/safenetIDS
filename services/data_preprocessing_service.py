@@ -92,8 +92,8 @@ class DataPreprocessingService:
 
     def __init__(self,
                  kafka_bootstrap_servers='localhost:9092',
-                 input_topic='raw_data_event',
-                 output_topic='preprocess_data',
+                 input_topic='raw_data_event_rf',
+                 output_topic='preprocess_data_rf',
                  model_type='random_forest'):
         """
         Khởi tạo Data Preprocessing Service
@@ -139,7 +139,7 @@ class DataPreprocessingService:
             self.consumer = KafkaConsumer(
                 self.input_topic,
                 bootstrap_servers=self.kafka_servers,
-                group_id='safenet-ids-preprocessing-group',
+                group_id='safenet-rf-preprocessing-group',
                 value_deserializer=lambda x: json.loads(x.decode('utf-8')),
                 key_deserializer=lambda x: x.decode('utf-8') if x else None,
                 auto_offset_reset='latest',  # Bắt đầu từ message mới nhất khi group mới được tạo
@@ -192,9 +192,11 @@ class DataPreprocessingService:
         for col in df.columns:
             if col in skip_cols:
                 continue  # Không động vào các cột cần giữ nguyên (ví dụ cột nhãn).
-            if pd.api.types.is_numeric_dtype(df[col]):
+            # Đảm bảo df[col] là Series, không phải DataFrame
+            col_series = df[col] if isinstance(df[col], pd.Series) else df[col].iloc[:, 0]
+            if pd.api.types.is_numeric_dtype(col_series):
                 continue  # Nếu đã là số thì không cần xử lý thêm.
-            coerced = pd.to_numeric(df[col], errors="coerce")  # Thử chuyển về kiểu số; lỗi sẽ thành NaN.
+            coerced = pd.to_numeric(col_series, errors="coerce")  # Thử chuyển về kiểu số; lỗi sẽ thành NaN.
             df[col] = coerced  # Gán lại cột đã được xử lý.
         return df
 
@@ -205,17 +207,27 @@ class DataPreprocessingService:
         Logic giống hệt scripts/preprocess_dataset.py
         """
         numeric_cols = df.select_dtypes(include=["number"]).columns.difference(skip_cols)
-        df[numeric_cols] = df[numeric_cols].fillna(df[numeric_cols].median())
+        # Đảm bảo median() trả về Series hoặc scalar, không phải DataFrame
+        if len(numeric_cols) > 0:
+            # Với DataFrame 1 row, fillna từng cột một để tránh lỗi
+            for col in numeric_cols:
+                col_series = df[col] if isinstance(df[col], pd.Series) else df[col].iloc[:, 0]
+                if col_series.isna().any():
+                    median_val = col_series.median()
+                    if pd.notna(median_val):
+                        df[col] = col_series.fillna(median_val)
         # Median ổn định hơn mean khi có ngoại lệ, phù hợp để điền thiếu cho dữ liệu số.
 
         non_numeric_cols = df.columns.difference(numeric_cols.union(skip_cols))
         for col in non_numeric_cols:
-            if df[col].isna().any():
-                mode = df[col].mode(dropna=True)  # Mode đại diện cho giá trị phổ biến nhất.
+            # Đảm bảo df[col] là Series, không phải DataFrame
+            col_series = df[col] if isinstance(df[col], pd.Series) else df[col].iloc[:, 0]
+            if col_series.isna().any():
+                mode = col_series.mode(dropna=True)  # Mode đại diện cho giá trị phổ biến nhất.
                 if not mode.empty:
-                    df[col] = df[col].fillna(mode.iloc[0])  # Điền thiếu bằng mode đầu tiên.
+                    df[col] = col_series.fillna(mode.iloc[0])  # Điền thiếu bằng mode đầu tiên.
                 else:
-                    df[col] = df[col].fillna("")  # Nếu không xác định được mode, đặt rỗng để nhất quán.
+                    df[col] = col_series.fillna("")  # Nếu không xác định được mode, đặt rỗng để nhất quán.
         return df
 
     @staticmethod
@@ -228,13 +240,13 @@ class DataPreprocessingService:
             logger.info(f"Không tìm thấy cột nhãn {label_col}, bỏ qua bước mã hóa.")
             return df, {}
 
-        label_series = df[label_col].astype(str).str.strip()  # Đồng nhất kiểu dữ liệu và bỏ khoảng trắng.
+        # Đảm bảo df[label_col] là Series, không phải DataFrame
+        label_series = df[label_col] if isinstance(df[label_col], pd.Series) else df[label_col].iloc[:, 0]
+        label_series = label_series.astype(str).str.strip()  # Đồng nhất kiểu dữ liệu và bỏ khoảng trắng.
         df[label_col] = label_series  # Cập nhật lại cột gốc sau khi làm sạch.
         codes, uniques = pd.factorize(label_series, sort=True)  # Mã hóa nhãn thành số nguyên.
         df[f"{label_col}_encoded"] = codes  # Thêm cột nhãn đã mã hóa.
-        # Ensure mapping uses pure Python types
-        uniques_list = [str(label) for label in uniques]  # Convert to list of strings
-        mapping = {int(code): uniques_list[code] for code in range(len(uniques_list))}  # Bảng tra cứu để giải mã lại.
+        mapping = {code: label for code, label in enumerate(uniques)}  # Bảng tra cứu để giải mã lại.
         return df, mapping
 
     @staticmethod
@@ -268,12 +280,14 @@ class DataPreprocessingService:
         default_group = "other"  # Phân loại mặc định cho nhãn chưa định nghĩa.
         mapping_report: Dict[str, str] = {}
 
-        cleaned_series = df[source_col].astype(str).str.strip()
+        # Đảm bảo df[source_col] là Series, không phải DataFrame
+        source_series = df[source_col] if isinstance(df[source_col], pd.Series) else df[source_col].iloc[:, 0]
+        cleaned_series = source_series.astype(str).str.strip()
         # Xây dựng mapping thực tế từ nhãn gốc -> nhóm.
         for original_label in cleaned_series.unique():
-            normalized = str(original_label).lower()
+            normalized = original_label.lower()
             group_name = group_rules.get(normalized, default_group)
-            mapping_report[str(original_label)] = group_name
+            mapping_report[original_label] = group_name
 
         group_series = cleaned_series.map(mapping_report)
         df[group_col] = group_series  # Gán vào DataFrame.
@@ -298,6 +312,9 @@ class DataPreprocessingService:
             return df
         
         def map_to_binary(group_value):
+            # Đảm bảo group_value là scalar, không phải Series hoặc DataFrame
+            if isinstance(group_value, (pd.Series, pd.DataFrame)):
+                group_value = group_value.iloc[0] if len(group_value) > 0 else None
             if pd.isna(group_value):
                 return 0
             group_str = str(group_value).lower().strip()
@@ -306,9 +323,13 @@ class DataPreprocessingService:
             else:  # dos, ddos, portscan, other -> attack
                 return 1
         
-        df[binary_col] = df[group_col].apply(map_to_binary)
+        # Đảm bảo df[group_col] là Series, không phải DataFrame
+        group_series = df[group_col] if isinstance(df[group_col], pd.Series) else df[group_col].iloc[:, 0]
+        df[binary_col] = group_series.apply(map_to_binary)
         logger.debug(f"Đã tạo cột binary label: {binary_col}")
-        logger.debug(f"Binary distribution: {df[binary_col].value_counts().to_dict()}")
+        # Đảm bảo df[binary_col] là Series trước khi value_counts
+        binary_series = df[binary_col] if isinstance(df[binary_col], pd.Series) else df[binary_col].iloc[:, 0]
+        logger.debug(f"Binary distribution: {binary_series.value_counts().to_dict()}")
         return df
 
     @staticmethod
@@ -330,6 +351,9 @@ class DataPreprocessingService:
             return df
         
         def map_to_attack_type(group_value):
+            # Đảm bảo group_value là scalar, không phải Series hoặc DataFrame
+            if isinstance(group_value, (pd.Series, pd.DataFrame)):
+                group_value = group_value.iloc[0] if len(group_value) > 0 else None
             if pd.isna(group_value):
                 return -1
             group_str = str(group_value).lower().strip()
@@ -344,9 +368,13 @@ class DataPreprocessingService:
             else:
                 return -1  # Unknown
         
-        df[attack_type_col] = df[group_col].apply(map_to_attack_type)
+        # Đảm bảo df[group_col] là Series, không phải DataFrame
+        group_series = df[group_col] if isinstance(df[group_col], pd.Series) else df[group_col].iloc[:, 0]
+        df[attack_type_col] = group_series.apply(map_to_attack_type)
         logger.debug(f"Đã tạo cột attack type label: {attack_type_col}")
-        logger.debug(f"Attack type distribution: {df[attack_type_col].value_counts().to_dict()}")
+        # Đảm bảo df[attack_type_col] là Series trước khi value_counts
+        attack_type_series = df[attack_type_col] if isinstance(df[attack_type_col], pd.Series) else df[attack_type_col].iloc[:, 0]
+        logger.debug(f"Attack type distribution: {attack_type_series.value_counts().to_dict()}")
         return df
 
     @staticmethod
@@ -359,7 +387,9 @@ class DataPreprocessingService:
 
         for col in df_copy.columns:
             if col not in skip_cols:
-                non_null_ratio = df_copy[col].notnull().mean()
+                # Đảm bảo df_copy[col] là Series, không phải DataFrame
+                col_series = df_copy[col] if isinstance(df_copy[col], pd.Series) else df_copy[col].iloc[:, 0]
+                non_null_ratio = col_series.notnull().mean()
                 if non_null_ratio < min_non_null_ratio:
                     cols_to_drop.append(col)
                     logger.info(f"Dropping sparse column {col} (non-null ratio: {non_null_ratio:.2f})")
@@ -379,7 +409,9 @@ class DataPreprocessingService:
         for col in df.columns:
             if col in skip_cols:
                 continue
-            if df[col].nunique(dropna=False) <= 1:  # Cột có 0-1 giá trị => không hữu dụng.
+            # Đảm bảo df[col] là Series, không phải DataFrame
+            col_series = df[col] if isinstance(df[col], pd.Series) else df[col].iloc[:, 0]
+            if col_series.nunique(dropna=False) <= 1:  # Cột có 0-1 giá trị => không hữu dụng.
                 dropped.append(col)
         if dropped:
             df = df.drop(columns=dropped)
@@ -397,7 +429,8 @@ class DataPreprocessingService:
             return {}
         clip_info: Dict[str, Dict[str, float]] = {}
         for col in numeric_cols:
-            series = df[col]
+            # Đảm bảo df[col] là Series, không phải DataFrame
+            series = df[col] if isinstance(df[col], pd.Series) else df[col].iloc[:, 0]
             if not np.issubdtype(series.dtype, np.number):
                 continue
             q1 = series.quantile(0.25)  # Phân vị thứ 25.
@@ -424,7 +457,8 @@ class DataPreprocessingService:
             return df, stats
         numeric_cols = [col for col in numeric_cols if col in df.columns]
         for col in numeric_cols:
-            series = df[col]
+            # Đảm bảo df[col] là Series, không phải DataFrame
+            series = df[col] if isinstance(df[col], pd.Series) else df[col].iloc[:, 0]
             if not np.issubdtype(series.dtype, np.number):
                 continue
             if method == "standard":
@@ -444,6 +478,27 @@ class DataPreprocessingService:
             else:
                 raise ValueError(f"Phương pháp scale không hỗ trợ: {method}")
         return df, stats
+
+    def _convert_numpy_to_python_types(self, obj):
+        """
+        Recursively convert numpy/pandas types to Python native types for JSON serialization
+        """
+        if isinstance(obj, np.ndarray):
+            return obj.tolist()
+        elif isinstance(obj, (np.integer, np.int64, np.int32, np.int16, np.int8)):
+            return int(obj)
+        elif isinstance(obj, (np.floating, np.float64, np.float32, np.float16)):
+            return float(obj)
+        elif isinstance(obj, (np.bool_, bool)):
+            return bool(obj)
+        elif isinstance(obj, (list, tuple)):
+            return [self._convert_numpy_to_python_types(item) for item in obj]
+        elif isinstance(obj, dict):
+            return {key: self._convert_numpy_to_python_types(value) for key, value in obj.items()}
+        elif pd.isna(obj):
+            return None
+        else:
+            return obj
 
     def preprocess_single_record(self, record: Dict[str, Any]) -> Dict[str, Any]:
         """
@@ -470,7 +525,9 @@ class DataPreprocessingService:
             logger.debug(f"Looking for label column: '{label_col}'")
             logger.debug(f"Label column found: {label_col in df.columns}")
             if label_col in df.columns:
-                logger.debug(f"Label values in record: {df[label_col].unique()}")
+                # Đảm bảo df[label_col] là Series, không phải DataFrame
+                label_series = df[label_col] if isinstance(df[label_col], pd.Series) else df[label_col].iloc[:, 0]
+                logger.debug(f"Label values in record: {label_series.unique()}")
 
             # 2. Thay thế vô hạn bằng NaN để có thể xử lý thiếu nhất quán
             df = df.replace([np.inf, -np.inf], np.nan)
@@ -483,15 +540,20 @@ class DataPreprocessingService:
 
             # 5. Loại bỏ dòng thiếu nhãn (nếu có)
             if label_col in df.columns:
-                missing_labels = df[label_col].isna().sum()
+                # Đảm bảo df[label_col] là Series, không phải DataFrame
+                label_series = df[label_col] if isinstance(df[label_col], pd.Series) else df[label_col].iloc[:, 0]
+                missing_labels = label_series.isna().sum()
                 if missing_labels:
-                    df = df[df[label_col].notna()].reset_index(drop=True)
+                    df = df[label_series.notna()].reset_index(drop=True)
                     logger.info(f"Đã loại bỏ {missing_labels} dòng thiếu nhãn ({label_col}).")
 
             # 6. Mã hóa nhãn (nếu tồn tại)
             label_mapping: Dict[int, str] = {}
             if label_col in df.columns:
                 df, label_mapping = self.encode_label(df, label_col)
+                logger.debug(f"Encoded label column '{label_col}' -> created '{label_col}_encoded' with mapping: {label_mapping}")
+            else:
+                logger.warning(f"Label column '{label_col}' not found in DataFrame after normalization. Available columns: {list(df.columns)[:20]}")
 
             # 7. Tạo cột label_group
             label_group_col = 'label_group'
@@ -501,7 +563,9 @@ class DataPreprocessingService:
                 df, label_group_mapping = self.add_label_group_column(df, label_col, label_group_col)
                 logger.debug(f"Label group mapping: {label_group_mapping}")
                 if label_group_col in df.columns:
-                    logger.debug(f"Label group values: {df[label_group_col].unique()}")
+                    # Đảm bảo df[label_group_col] là Series, không phải DataFrame
+                    label_group_series = df[label_group_col] if isinstance(df[label_group_col], pd.Series) else df[label_group_col].iloc[:, 0]
+                    logger.debug(f"Label group values: {label_group_series.unique()}")
                 df, label_group_encoded_mapping = self.encode_label(df, label_group_col)
                 logger.debug(f"Label group encoded mapping: {label_group_encoded_mapping}")
                 
@@ -563,81 +627,78 @@ class DataPreprocessingService:
             elif self.model_type == "cnn_lstm":
                 # CNN+LSTM: Không scale ở preprocessing vì model có StandardScaler trong pipeline
                 logger.info("Bỏ qua scaling cho CNN+LSTM - Model sẽ tự scale khi predict")
-                scaling_stats = {}  # Empty dict for CNN+LSTM
 
             else:
                 # Default: Không scale để an toàn
                 logger.info(f"Bỏ qua scaling cho {self.model_type} - Model sẽ tự scale khi predict")
-                scaling_stats = {}  # Empty dict for default
 
             # Debug: Log số lượng features sau preprocessing
             numeric_features = df.select_dtypes(include=["number"]).columns.difference(skip_cols)
             logger.debug(f"Total numeric features after preprocessing: {len(numeric_features)}")
             logger.debug(f"Total columns in processed record: {len(df.columns)}")
             if label_col in df.columns:
-                label_val = df[label_col].iloc[0]
-                label_group_val = df.get(label_group_col, 'N/A').iloc[0] if label_group_col in df.columns else 'N/A'
-                binary_val = df.get(binary_col, 'N/A').iloc[0] if binary_col in df.columns else 'N/A'
-                attack_type_val = df.get(attack_type_col, 'N/A').iloc[0] if attack_type_col in df.columns else 'N/A'
+                # Đảm bảo tất cả các cột là Series trước khi truy cập iloc[0]
+                label_series = df[label_col] if isinstance(df[label_col], pd.Series) else df[label_col].iloc[:, 0]
+                label_val = label_series.iloc[0] if len(label_series) > 0 else 'N/A'
+                
+                if label_group_col in df.columns:
+                    label_group_series = df[label_group_col] if isinstance(df[label_group_col], pd.Series) else df[label_group_col].iloc[:, 0]
+                    label_group_val = label_group_series.iloc[0] if len(label_group_series) > 0 else 'N/A'
+                else:
+                    label_group_val = 'N/A'
+                
+                if binary_col in df.columns:
+                    binary_series = df[binary_col] if isinstance(df[binary_col], pd.Series) else df[binary_col].iloc[:, 0]
+                    binary_val = binary_series.iloc[0] if len(binary_series) > 0 else 'N/A'
+                else:
+                    binary_val = 'N/A'
+                
+                if attack_type_col in df.columns:
+                    attack_type_series = df[attack_type_col] if isinstance(df[attack_type_col], pd.Series) else df[attack_type_col].iloc[:, 0]
+                    attack_type_val = attack_type_series.iloc[0] if len(attack_type_series) > 0 else 'N/A'
+                else:
+                    attack_type_val = 'N/A'
+                
                 logger.info(f"Processed record - Label: {label_val}, Label group: {label_group_val}, Binary: {binary_val}, Attack type: {attack_type_val}")
             
-            # Chuyển về dictionary và convert tất cả pandas/numpy types thành Python native types
-            def convert_to_json_serializable(obj):
-                """Convert pandas/numpy objects to JSON serializable Python types"""
-                if isinstance(obj, (np.integer, np.int64, np.int32)):
-                    return int(obj)
-                elif isinstance(obj, (np.floating, np.float64, np.float32)):
-                    return float(obj)
-                elif isinstance(obj, np.ndarray):
-                    return obj.tolist()
-                elif hasattr(obj, 'tolist'):  # pandas Index, Series, etc.
-                    try:
-                        return obj.tolist()
-                    except:
-                        return str(obj)
-                elif isinstance(obj, dict):
-                    return {k: convert_to_json_serializable(v) for k, v in obj.items()}
-                elif isinstance(obj, list):
-                    return [convert_to_json_serializable(item) for item in obj]
-                elif pd.isna(obj):
-                    return None
-                else:
-                    return obj
-
-            processed_record = {k: convert_to_json_serializable(v) for k, v in df.iloc[0].to_dict().items()}
+            # Chuyển về dictionary và convert numpy types to native Python types
+            processed_record = self._convert_numpy_to_python_types(df.iloc[0].to_dict())
+            
+            # Debug: Log các cột encoded có trong processed_record
+            encoded_cols = [col for col in processed_record.keys() if '_encoded' in col]
+            logger.debug(f"Encoded columns in processed_record: {encoded_cols}")
+            if f"{label_col}_encoded" not in processed_record:
+                logger.warning(f"WARNING: '{label_col}_encoded' not found in processed_record! Available keys: {list(processed_record.keys())[:30]}")
 
             # Thêm metadata preprocessing
             processed_record['preprocessing_timestamp'] = datetime.now().isoformat()
-
-            # Ensure all metadata components are JSON serializable first
-            safe_label_mapping = convert_to_json_serializable(label_mapping)
-            safe_label_group_mapping = convert_to_json_serializable(label_group_mapping)
-            safe_label_group_encoded_mapping = convert_to_json_serializable(label_group_encoded_mapping)
-            safe_clip_stats = convert_to_json_serializable(clip_stats)
-            safe_scaling_stats = convert_to_json_serializable(scaling_stats)  # Ensure JSON serializable
-            safe_constant_columns_dropped = convert_to_json_serializable(constant_dropped)
-
             preprocessing_metadata = {
                 'model_type': self.model_type,
-                'label_mapping': safe_label_mapping,
-                'label_group_mapping': safe_label_group_mapping,
-                'label_group_encoded_mapping': safe_label_group_encoded_mapping,
-                'clip_stats': safe_clip_stats,
-                'scaling_stats': safe_scaling_stats,
-                'constant_columns_dropped': safe_constant_columns_dropped,
-                'processed_columns': [str(col) for col in df.columns],
+                'label_mapping': label_mapping,
+                'label_group_mapping': label_group_mapping,
+                'label_group_encoded_mapping': label_group_encoded_mapping,
+                'clip_stats': clip_stats,
+                'scaling_stats': scaling_stats,
+                'constant_columns_dropped': constant_dropped,
+                'processed_columns': list(df.columns),
                 'numeric_features_count': len(numeric_features)
             }
-
             # Thêm thông tin về binary và attack type labels nếu có
             if binary_col in df.columns:
                 preprocessing_metadata['binary_label_column'] = binary_col
-                preprocessing_metadata['binary_label_value'] = int(df[binary_col].iloc[0]) if pd.notna(df[binary_col].iloc[0]) else None
+                # Đảm bảo df[binary_col] là Series, không phải DataFrame
+                binary_series = df[binary_col] if isinstance(df[binary_col], pd.Series) else df[binary_col].iloc[:, 0]
+                binary_val = binary_series.iloc[0] if len(binary_series) > 0 else None
+                preprocessing_metadata['binary_label_value'] = int(binary_val) if pd.notna(binary_val) else None
             if attack_type_col in df.columns:
                 preprocessing_metadata['attack_type_label_column'] = attack_type_col
-                preprocessing_metadata['attack_type_label_value'] = int(df[attack_type_col].iloc[0]) if pd.notna(df[attack_type_col].iloc[0]) else None
-
-            processed_record['preprocessing_metadata'] = preprocessing_metadata
+                # Đảm bảo df[attack_type_col] là Series, không phải DataFrame
+                attack_type_series = df[attack_type_col] if isinstance(df[attack_type_col], pd.Series) else df[attack_type_col].iloc[:, 0]
+                attack_type_val = attack_type_series.iloc[0] if len(attack_type_series) > 0 else None
+                preprocessing_metadata['attack_type_label_value'] = int(attack_type_val) if pd.notna(attack_type_val) else None
+            
+            # Convert preprocessing_metadata to ensure all values are JSON serializable
+            processed_record['preprocessing_metadata'] = self._convert_numpy_to_python_types(preprocessing_metadata)
 
             return processed_record
 
@@ -646,25 +707,7 @@ class DataPreprocessingService:
             # Trả về record gốc với flag error
             record['preprocessing_error'] = str(e)
             record['preprocessing_timestamp'] = datetime.now().isoformat()
-            # Ensure record is JSON serializable
-            def convert_to_json_serializable(obj):
-                """Convert pandas/numpy objects to JSON serializable Python types"""
-                if isinstance(obj, (np.integer, np.int64, np.int32)):
-                    return int(obj)
-                elif isinstance(obj, (np.floating, np.float64, np.float32)):
-                    return float(obj)
-                elif isinstance(obj, np.ndarray):
-                    return obj.tolist()
-                elif isinstance(obj, dict):
-                    return {k: convert_to_json_serializable(v) for k, v in obj.items()}
-                elif isinstance(obj, list):
-                    return [convert_to_json_serializable(item) for item in obj]
-                elif pd.isna(obj):
-                    return None
-                else:
-                    return obj
-
-            return {k: convert_to_json_serializable(v) for k, v in record.items()}
+            return record
 
     def send_processed_data(self, data: Dict[str, Any], original_key: str = None):
         """
@@ -677,15 +720,6 @@ class DataPreprocessingService:
         try:
             key = original_key or data.get('timestamp', str(datetime.now().timestamp()))
 
-            # Validate JSON serialization before sending
-            try:
-                import json
-                json.dumps(data)
-            except TypeError as json_error:
-                logger.error(f"JSON serialization error: {json_error}")
-                logger.error("Skipping message due to serialization issue")
-                return  # Don't send if serialization fails
-
             future = self.producer.send(self.output_topic, value=data, key=key)
             record_metadata = future.get(timeout=10)
 
@@ -695,18 +729,6 @@ class DataPreprocessingService:
 
         except Exception as e:
             logger.error(f"Failed to send processed data: {e}")
-            # Log the problematic data structure
-            import json
-            try:
-                json.dumps(data)
-            except Exception as json_error:
-                logger.error(f"JSON serialization failed: {json_error}")
-                # Try to identify the problematic part
-                for k, v in data.items():
-                    try:
-                        json.dumps(v)
-                    except:
-                        logger.error(f"Problematic field: {k} = {type(v)}")
 
     def start_processing(self):
         """Bắt đầu quá trình xử lý dữ liệu"""
@@ -926,9 +948,9 @@ def main():
     parser = argparse.ArgumentParser(description='Safenet IDS - Data Preprocessing Service')
     parser.add_argument('--kafka-servers', default='localhost:9092',
                        help='Kafka bootstrap servers')
-    parser.add_argument('--input-topic', default='raw_data_event',
+    parser.add_argument('--input-topic', default='raw_data_event_rf',
                        help='Input topic name')
-    parser.add_argument('--output-topic', default='preprocess_data',
+    parser.add_argument('--output-topic', default='preprocess_data_rf',
                        help='Output topic name')
     parser.add_argument('--model-type', choices=('random_forest', 'cnn_lstm'),
                        default='random_forest',

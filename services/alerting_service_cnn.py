@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-Safenet IDS - Alerting Service
-Đọc từ topic level2_predictions, tạo alerts và gửi đến topic ids_alerts
+Safenet IDS - Alerting Service (CNN)
+Đọc từ topic level_2_predictions_cnn và level_3_predictions_cnn, tạo alerts và gửi đến topic alert_cnn
 """
 
 import json
@@ -22,9 +22,9 @@ class AlertingService:
 
     def __init__(self,
                  kafka_bootstrap_servers='127.0.0.1:9092',
-                 input_topic='level_2_predictions',
-                 output_topic='alert',
-                 db_path='services/data/alerts.db',
+                 input_topic='level_2_predictions_cnn',
+                 output_topic='alert_cnn',
+                 db_path='services/data/alerts_cnn.db',
                  alert_thresholds=None):
         """
         Khởi tạo Alerting Service
@@ -89,9 +89,9 @@ class AlertingService:
             self.db_conn.row_factory = sqlite3.Row  # Để có thể truy cập bằng tên cột
             cursor = self.db_conn.cursor()
 
-            # Tạo bảng alerts
+            # Tạo bảng alerts_cnn (riêng biệt cho CNN pipeline)
             cursor.execute('''
-                CREATE TABLE IF NOT EXISTS alerts (
+                CREATE TABLE IF NOT EXISTS alerts_cnn (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     alert_id TEXT UNIQUE,
                     timestamp TEXT,
@@ -109,9 +109,9 @@ class AlertingService:
                 )
             ''')
 
-            # Tạo bảng alert_stats
+            # Tạo bảng alert_stats_cnn (riêng biệt cho CNN pipeline)
             cursor.execute('''
-                CREATE TABLE IF NOT EXISTS alert_stats (
+                CREATE TABLE IF NOT EXISTS alert_stats_cnn (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     timestamp TEXT,
                     attack_type TEXT,
@@ -124,11 +124,11 @@ class AlertingService:
             self.db_conn.commit()
             
             # Kiểm tra xem bảng đã được tạo chưa
-            cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='alerts'")
+            cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='alerts_cnn'")
             table_exists = cursor.fetchone()
             if table_exists:
                 logger.info(f"Database initialized successfully at {self.db_path.absolute()}")
-                logger.info("Tables created: alerts, alert_stats")
+                logger.info("Tables created: alerts_cnn, alert_stats_cnn")
             else:
                 logger.error("Failed to create alerts table!")
                 raise Exception("Alerts table was not created")
@@ -140,14 +140,14 @@ class AlertingService:
             raise
 
     def _init_consumer(self):
-        """Khởi tạo Kafka consumer - đọc từ cả level_2_predictions và level_3_predictions"""
+        """Khởi tạo Kafka consumer - đọc từ cả level_2_predictions_cnn và level_3_predictions_cnn"""
         try:
-            # Đọc từ cả 2 topics: level_2_predictions (ddos, portscan) và level_3_predictions (dos chi tiết)
-            topics = ['level_2_predictions', 'level_3_predictions']
+            # Đọc từ cả 2 topics: level_2_predictions_cnn (ddos, portscan) và level_3_predictions_cnn (dos chi tiết)
+            topics = ['level_2_predictions_cnn', 'level_3_predictions_cnn']
             self.consumer = KafkaConsumer(
                 *topics,
                 bootstrap_servers=self.kafka_servers,
-                group_id='safenet-ids-alerting-group',
+                group_id='safenet-cnn-alerting-group',
                 value_deserializer=lambda x: json.loads(x.decode('utf-8')),
                 key_deserializer=lambda x: x.decode('utf-8') if x else None,
                 auto_offset_reset='earliest',
@@ -456,11 +456,11 @@ class AlertingService:
             
             # Kiểm tra xem bảng có tồn tại không
             cursor = self.db_conn.cursor()
-            cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='alerts'")
+            cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='alerts_cnn'")
             table_exists = cursor.fetchone()
             
             if not table_exists:
-                logger.error("Alerts table does not exist, recreating database...")
+                logger.error("Alerts_cnn table does not exist, recreating database...")
                 self._init_database()
                 cursor = self.db_conn.cursor()
 
@@ -469,7 +469,7 @@ class AlertingService:
             alert_created_at = alert.get('alert_created_at', datetime.now().isoformat())
             
             cursor.execute('''
-                INSERT INTO alerts (
+                INSERT INTO alerts_cnn (
                     alert_id, timestamp, severity, attack_type, confidence,
                     source_ip, destination_ip, source_port, destination_port,
                     protocol, description, raw_data, status
@@ -524,7 +524,7 @@ class AlertingService:
 
             for attack_type, count in self.alert_stats.items():
                 cursor.execute('''
-                    INSERT INTO alert_stats (timestamp, attack_type, count, time_window)
+                    INSERT INTO alert_stats_cnn (timestamp, attack_type, count, time_window)
                     VALUES (?, ?, ?, ?)
                 ''', (current_time.isoformat(), attack_type, count, time_window))
 
@@ -612,10 +612,10 @@ class AlertingService:
                 else:
                     attack_type = str(attack_type_raw).lower()
 
-                # Nếu từ level_2_predictions và là dos -> đợi Level 3
-                if topic_name == 'level_2_predictions' and attack_type == 'dos':
+                # Nếu từ level_2_predictions_cnn và là dos -> đợi Level 3
+                if topic_name == 'level_2_predictions_cnn' and attack_type == 'dos':
                     logger.debug(f"DoS attack detected at Level 2 from topic '{topic_name}' - "
-                               f"waiting for Level 3 detail prediction from level_3_predictions")
+                               f"waiting for Level 3 detail prediction from level_3_predictions_cnn")
                 # Nếu không phải dos hoặc từ level_3_predictions (không nên xảy ra) -> tạo alert
                 elif attack_type != 'dos' and self._should_create_alert(level2_pred):
                     # Tạo alert từ Level 2 (ddos, portscan)
@@ -696,7 +696,7 @@ class AlertingService:
     def start_alerting(self):
         """Bắt đầu quá trình alerting"""
         self.is_running = True
-        logger.info(f"Starting alerting service: reading from level_2_predictions and level_3_predictions -> {self.output_topic}")
+        logger.info(f"Starting alerting service (CNN): reading from level_2_predictions_cnn and level_3_predictions_cnn -> {self.output_topic}")
         logger.info("Alert logic: DoS attacks require Level 3 detail, ddos/portscan use Level 2")
 
         stats_update_interval = 300  # 5 minutes
@@ -754,14 +754,14 @@ def main():
     """Main function"""
     import argparse
 
-    parser = argparse.ArgumentParser(description='Safenet IDS - Alerting Service')
+    parser = argparse.ArgumentParser(description='Safenet IDS - Alerting Service (CNN)')
     parser.add_argument('--kafka-servers', default='127.0.0.1:9092',
                        help='Kafka bootstrap servers')
-    parser.add_argument('--input-topic', default='level_2_predictions',
-                       help='Input topic name (deprecated - service reads from both level_2_predictions and level_3_predictions)')
-    parser.add_argument('--output-topic', default='alert',
+    parser.add_argument('--input-topic', default='level_2_predictions_cnn',
+                       help='Input topic name (deprecated - service reads from both level_2_predictions_cnn and level_3_predictions_cnn)')
+    parser.add_argument('--output-topic', default='alert_cnn',
                        help='Output topic name (IDS alerts)')
-    parser.add_argument('--db-path', default='services/data/alerts.db',
+    parser.add_argument('--db-path', default='services/data/alerts_cnn.db',
                        help='Path to alerts database')
     parser.add_argument('--alert-threshold', type=float, default=0.7,
                        help='Default confidence threshold for alerts')
@@ -778,14 +778,14 @@ def main():
         level=logging.INFO,
         format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
         handlers=[
-            logging.FileHandler('services/logs/alerting.log'),
+            logging.FileHandler('services/logs/alerting_cnn.log'),
             logging.StreamHandler()
         ]
     )
 
     # Tạo logger
     global logger
-    logger = logging.getLogger('Alerting')
+    logger = logging.getLogger('AlertingCNN')
 
     # Cập nhật thresholds
     thresholds = {
@@ -807,7 +807,7 @@ def main():
     )
 
     try:
-        logger.info("Starting Safenet IDS Alerting Service...")
+        logger.info("Starting Safenet IDS Alerting Service (CNN)...")
         service.start_alerting()
     except KeyboardInterrupt:
         logger.info("Service stopped by user")

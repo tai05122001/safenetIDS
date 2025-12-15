@@ -38,8 +38,8 @@ class Level3PredictionServiceRF:
 
     def __init__(self,
                  kafka_bootstrap_servers='localhost:9092',
-                 input_topic='level_2_predictions',
-                 output_topic='level_3_predictions',
+                 input_topic='level_2_predictions_rf',
+                 output_topic='level_3_predictions_rf',
                  model_path='artifacts_level3_dos_rf/dos/ids_pipeline_level3_dos_rf.joblib',
                  metadata_path='artifacts_level3_dos_rf/dos/metadata.json'):
         """
@@ -250,11 +250,18 @@ class Level3PredictionServiceRF:
             exclude_cols = [
                 'timestamp', 'source_ip', 'destination_ip',
                 'label', 'label_group',
-                'label_encoded', 'label_group_encoded',
+                'label_group_encoded',
                 'label_binary_encoded',  # QUAN TRỌNG: Loại bỏ label column của Level 1
                 'label_attack_type_encoded',  # QUAN TRỌNG: Loại bỏ label column của Level 2
                 'preprocessing_timestamp', 'preprocessing_metadata', 'preprocessing_error'
             ]
+            
+            # Nếu model expect label_encoded như một feature, không loại bỏ nó
+            # (Một số model được train với label_encoded như một feature)
+            if self.expected_feature_names and 'label_encoded' in self.expected_feature_names:
+                logger.debug("Model expects 'label_encoded' as a feature, keeping it in features")
+            else:
+                exclude_cols.append('label_encoded')
             
             # Thêm các cột từ metadata nếu có
             if self.metadata and 'drop_columns_resolved' in self.metadata:
@@ -270,8 +277,10 @@ class Level3PredictionServiceRF:
             feature_cols = []
             for col in df.columns:
                 if col not in exclude_cols:
-                    if df[col].dtype in ['int64', 'float64', 'float32', 'int32']:
-                        if not pd.isna(df[col].iloc[0]):
+                    # Đảm bảo df[col] là Series, không phải DataFrame
+                    col_series = df[col] if isinstance(df[col], pd.Series) else df[col].iloc[:, 0]
+                    if col_series.dtype in ['int64', 'float64', 'float32', 'int32']:
+                        if not pd.isna(col_series.iloc[0]):
                             feature_cols.append(col)
 
             if not feature_cols:
@@ -480,9 +489,9 @@ def main():
     parser = argparse.ArgumentParser(description='Safenet IDS - Level 3 Prediction Service (Random Forest)')
     parser.add_argument('--kafka-servers', default='localhost:9092',
                        help='Kafka bootstrap servers')
-    parser.add_argument('--input-topic', default='level_2_predictions',
+    parser.add_argument('--input-topic', default='level_2_predictions_rf',
                        help='Input topic name (Level 2 predictions)')
-    parser.add_argument('--output-topic', default='level_3_predictions',
+    parser.add_argument('--output-topic', default='level_3_predictions_rf',
                        help='Output topic name (Level 3 predictions)')
     parser.add_argument('--model-path', default='artifacts_level3_dos_rf/dos/ids_pipeline_level3_dos_rf.joblib',
                        help='Path to Level 3 Random Forest model file')

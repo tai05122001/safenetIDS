@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Safenet IDS - Real-time Packet Capture Service
+Safenet IDS - Real-time Packet Capture Service (Random Forest Pipeline)
 Bắt real-time traffic từ network interface sử dụng tshark (Wireshark)
 Hoặc xử lý pcap files offline với feature extraction đầy đủ
 
@@ -8,7 +8,7 @@ MODE MẶC ĐỊNH: Real-time Capture Mode
 - Tự động bắt packets từ network interface
 - Nhóm packets thành flows (5-tuple)
 - Tính toán flow features giống CICIDS2017 (79 features - đầy đủ)
-- Gửi đến Kafka topic raw_data_event
+- Gửi đến Kafka topic raw_data_event_rf (Random Forest Pipeline)
 
 Chức năng:
 - [MẶC ĐỊNH] Bắt live traffic từ network interface (real-time mode) - 79 features từ tính toán
@@ -16,7 +16,7 @@ Chức năng:
 - [TÙY CHỌN] Dùng CICFlowMeter trong real-time mode (--use-cicflowmeter-realtime) - chậm hơn nhưng đảm bảo 79 features từ CICFlowMeter
 - Nhóm packets thành flows
 - Tính toán flow features giống CICIDS2017 (79 features)
-- Gửi đến Kafka topic raw_data_event
+- Gửi đến Kafka topic raw_data_event_rf (Random Forest Pipeline)
 """
 
 import json
@@ -41,11 +41,11 @@ logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     handlers=[
-        logging.FileHandler('services/logs/packet_capture.log', encoding='utf-8'),
+        logging.FileHandler('services/logs/packet_capture_rf.log', encoding='utf-8'),
         logging.StreamHandler()
     ]
 )
-logger = logging.getLogger('PacketCapture')
+logger = logging.getLogger('PacketCaptureRF')
 
 try:
     import pyshark
@@ -155,7 +155,7 @@ class RealTimePacketCapture:
     
     def __init__(self, 
                  kafka_bootstrap_servers='localhost:9092',
-                 topic='raw_data_event',
+                 topic='raw_data_event_rf',
                  interface=None,
                  flow_timeout=5,
                  min_packets_per_flow=2,
@@ -846,37 +846,28 @@ class RealTimePacketCapture:
     def _send_to_kafka(self, features):
         """Gửi flow features đến Kafka và flush ngay lập tức"""
         try:
-            # Convert numpy/pandas types to JSON serializable Python types
-            def convert_to_json_serializable(obj):
-                """Convert pandas/numpy objects to JSON serializable Python types"""
-                if isinstance(obj, (np.integer, np.int64, np.int32)):
-                    return int(obj)
-                elif isinstance(obj, (np.floating, np.float64, np.float32)):
-                    return float(obj)
-                elif isinstance(obj, np.ndarray):
-                    return obj.tolist()
-                elif isinstance(obj, dict):
-                    return {k: convert_to_json_serializable(v) for k, v in obj.items()}
-                elif isinstance(obj, list):
-                    return [convert_to_json_serializable(item) for item in obj]
-                else:
-                    return obj
-
-            # Ensure all values are JSON serializable
-            serializable_features = {k: convert_to_json_serializable(v) for k, v in features.items()}
-
-            key = serializable_features.get('timestamp', str(time.time()))
-            future = self.producer.send(self.topic, value=serializable_features, key=key)
+            # Thêm id field để dễ tracking (cho RF preprocessing service)
+            if 'id' not in features:
+                flow_id = f"rf_flow_{int(time.time() * 1000)}_{self.total_flows}"
+                features['id'] = flow_id
+            
+            # Đảm bảo có Label field (RF preprocessing service tìm 'Label' hoặc 'label')
+            if 'Label' not in features and 'label' not in features:
+                features['Label'] = features.get('label', 'BENIGN')
+            
+            key = features.get('timestamp', str(time.time()))
+            future = self.producer.send(self.topic, value=features, key=key)
             record_metadata = future.get(timeout=10)
-
+            
             # Flush ngay để đảm bảo message được gửi đến Kafka broker ngay lập tức
             self.producer.flush(timeout=1)
-
-            logger.info(f"Flow sent: {serializable_features['source_ip']}:{serializable_features['source_port']} -> "
-                       f"{serializable_features['destination_ip']}:{serializable_features['destination_port']} "
-                       f"(protocol: {serializable_features['protocol']}, "
-                       f"packets: {serializable_features['total_fwd_packets'] + serializable_features['total_backward_packets']}, "
-                       f"bytes: {serializable_features['total_length_of_fwd_packets'] + serializable_features['total_length_of_bwd_packets']})")
+            
+            logger.info(f"Flow sent to {self.topic}: {features['source_ip']}:{features['source_port']} -> "
+                       f"{features['destination_ip']}:{features['destination_port']} "
+                       f"(protocol: {features['protocol']}, "
+                       f"packets: {features['total_fwd_packets'] + features['total_backward_packets']}, "
+                       f"bytes: {features['total_length_of_fwd_packets'] + features['total_length_of_bwd_packets']}, "
+                       f"id: {features.get('id', 'N/A')})")
         except Exception as e:
             logger.error(f"Failed to send to Kafka: {e}")
     
@@ -1457,8 +1448,8 @@ def list_interfaces():
             logger.info(f"  {i}. {iface}")
         
         logger.info("=" * 60)
-        logger.info("Usage: python packet_capture_service.py --interface <interface_name>")
-        logger.info("Example: python services/packet_capture_service.py --interface \"Ethernet\"")
+        logger.info("Usage: python packet_capture_service_rf.py --interface <interface_name>")
+        logger.info("Example: python services/packet_capture_service_rf.py --interface \"Ethernet\"")
     except Exception as e:
         logger.error(f"Error listing interfaces: {e}")
         logger.error("Make sure Wireshark is installed and tshark is in PATH")
@@ -1470,7 +1461,7 @@ def main():
     import argparse
     
     parser = argparse.ArgumentParser(
-        description='Safenet IDS - Real-time Packet Capture Service (tshark/pyshark/CICFlowMeter)',
+        description='Safenet IDS - Real-time Packet Capture Service (Random Forest Pipeline) (tshark/pyshark/CICFlowMeter)',
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 MODE MẶC ĐỊNH: Real-time Capture Mode
@@ -1478,35 +1469,35 @@ MODE MẶC ĐỊNH: Real-time Capture Mode
 
 Examples:
   # [MẶC ĐỊNH] Real-time capture - tự động detect interface
-  python services/packet_capture_service.py
+  python services/packet_capture_service_rf.py
   
   # Real-time capture với interface cụ thể (Windows)
-  python services/packet_capture_service.py --interface "Ethernet"
+  python services/packet_capture_service_rf.py --interface "Ethernet"
   
   # Real-time capture với interface cụ thể (Linux)
-  python services/packet_capture_service.py --interface eth0
+  python services/packet_capture_service_rf.py --interface eth0
   
   # List available interfaces
-  python services/packet_capture_service.py --list-interfaces
+  python services/packet_capture_service_rf.py --list-interfaces
   
   # [TÙY CHỌN] Process PCAP file offline (auto-detect CICFlowMeter or use pyshark)
-  python services/packet_capture_service.py --pcap-file data/traffic.pcap
+  python services/packet_capture_service_rf.py --pcap-file data/traffic.pcap
   
   # Process PCAP file with CICFlowMeter (force) - đủ 79 features
-  python services/packet_capture_service.py --pcap-file data/traffic.pcap --use-cicflowmeter
+  python services/packet_capture_service_rf.py --pcap-file data/traffic.pcap --use-cicflowmeter
   
   # Process PCAP file with pyshark only
-  python services/packet_capture_service.py --pcap-file data/traffic.pcap --no-cicflowmeter
+  python services/packet_capture_service_rf.py --pcap-file data/traffic.pcap --no-cicflowmeter
   
   # Custom Kafka settings
-  python services/packet_capture_service.py --interface eth0 --kafka-servers localhost:9092 --topic raw_data_event
+  python services/packet_capture_service_rf.py --interface eth0 --kafka-servers localhost:9092 --topic raw_data_event_rf
         """
     )
     
     parser.add_argument('--kafka-servers', default='localhost:9092',
                        help='Kafka bootstrap servers (default: localhost:9092)')
-    parser.add_argument('--topic', default='raw_data_event',
-                       help='Kafka topic name (default: raw_data_event)')
+    parser.add_argument('--topic', default='raw_data_event_rf',
+                       help='Kafka topic name (default: raw_data_event_rf)')
     parser.add_argument('--interface', type=str,
                        help='Network interface name (required for live capture)')
     parser.add_argument('--pcap-file', type=str,

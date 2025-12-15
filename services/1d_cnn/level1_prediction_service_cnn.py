@@ -4,7 +4,7 @@ Kafka Service cho Level 1 Prediction sử dụng 1D CNN Model.
 Service này:
 - Consume messages từ topic 'preprocessed_events'
 - Sử dụng CNN 1D model để phân loại traffic: benign vs malicious
-- Publish kết quả đến topic 'level1_predictions'
+- Publish kết quả đến topic 'level_1_predictions'
 
 Model: CNN 1D được train từ train_level1_cnn.py
 """
@@ -33,8 +33,8 @@ class Level1CNNPredictionService:
         self,
         kafka_servers: str = "localhost:9092",
         group_id: str = "level1_cnn_service",
-        input_topic: str = "cnn_preprocess_data",
-        output_topic: str = "level1_predictions",
+        input_topic: str = "preprocess_data_cnn",
+        output_topic: str = "level_1_predictions_cnn",
         model_path: str = "artifacts_cnn/cnn_model_best.h5",
         scaler_path: str = "artifacts_cnn/scaler.joblib",
         label_encoder_path: str = "artifacts_cnn/label_encoder.joblib",
@@ -400,10 +400,14 @@ class Level1CNNPredictionService:
                 probability = float(predictions[0][0])
                 predicted_class_idx = 1 if probability > 0.5 else 0
                 confidence = max(probability, 1 - probability)
+                # ALWAYS log probability values for debugging (change from debug to info)
+                self.logger.info(f"PREDICTION DEBUG | Raw probability (malicious): {probability:.6f}, predicted_class_idx: {predicted_class_idx}, confidence: {confidence:.6f}, threshold: 0.5")
             else:
                 # Multi-class classification
                 predicted_class_idx = int(np.argmax(predictions[0]))
                 confidence = float(np.max(predictions[0]))
+                # Debug logging for multi-class
+                self.logger.debug(f"Prediction probabilities: {predictions[0]}, predicted_class_idx: {predicted_class_idx}, confidence: {confidence:.6f}")
 
             # Get class name
             if hasattr(self.label_encoder, 'classes_'):
@@ -454,7 +458,8 @@ class Level1CNNPredictionService:
                 self.logger.warning(f"Unexpected CNN features shape: {X.shape}, expected (1, 1, 78)")
                 X = X.reshape(1, 1, -1)  # Force reshape, may fail if wrong size
 
-            self.logger.debug(f"Using preprocessed CNN features for message {message_id}, shape: {X.shape}")
+            # Log feature statistics for debugging
+            self.logger.info(f"FEATURE DEBUG | Message {message_id} | Shape: {X.shape} | Min: {X.min():.6f} | Max: {X.max():.6f} | Mean: {X.mean():.6f} | Std: {X.std():.6f}")
 
             # Make prediction
             prediction_result = self.predict(X)
@@ -476,9 +481,25 @@ class Level1CNNPredictionService:
                 self.logger.info(f"ATTACK DETECTED | ID: {message_id} | Confidence: {confidence:.3f}")
 
             # Log prediction (cả benign/malicious) để đối chiếu accuracy
-            self.logger.info(
-                f"LEVEL1 PREDICTED | ID: {message_id} | Prediction: {detection_type.lower()} | Confidence: {confidence:.3f}"
-            )
+            # Include raw probability for debugging
+            raw_probability = prediction_result.get('probabilities', [])
+            if raw_probability and len(raw_probability) > 0:
+                prob_str = f" | Raw Prob: {raw_probability[0]:.6f}" if len(raw_probability) == 1 else f" | Probs: {raw_probability}"
+            else:
+                prob_str = ""
+            
+            # ALWAYS log raw probability for debugging - especially for binary classification
+            # For binary classification with sigmoid, probabilities[0] is the probability of class 1 (malicious)
+            if len(raw_probability) == 1:
+                malicious_prob = raw_probability[0]
+                benign_prob = 1.0 - malicious_prob
+                self.logger.info(
+                    f"LEVEL1 PREDICTED | ID: {message_id} | Prediction: {detection_type.lower()} | Confidence: {confidence:.3f} | ClassIdx: {predicted_class_idx} | MaliciousProb: {malicious_prob:.6f} | BenignProb: {benign_prob:.6f}"
+                )
+            else:
+                self.logger.info(
+                    f"LEVEL1 PREDICTED | ID: {message_id} | Prediction: {detection_type.lower()} | Confidence: {confidence:.3f} | ClassIdx: {predicted_class_idx}{prob_str}"
+                )
 
             # Combine với thông tin gốc
             result = {
@@ -626,6 +647,32 @@ class Level1CNNPredictionService:
 
         self.logger.info("=" * 60)
 
+    def _log_final_summary(self):
+        """Log final summary statistics when service stops"""
+        self.logger.info("")
+        self.logger.info("=" * 60)
+        self.logger.info("FINAL LEVEL 1 PREDICTION SUMMARY (CNN):")
+        self.logger.info("=" * 60)
+        self.logger.info(f"Total predictions: {self.processed_count}")
+        self.logger.info(f"Total errors: {self.error_count}")
+
+        if self.processed_count > 0:
+            self.logger.info("")
+            self.logger.info("Prediction distribution:")
+            benign_pct = self.benign_count / self.processed_count * 100
+            malicious_pct = self.malicious_count / self.processed_count * 100
+            self.logger.info(f"  - Benign: {self.benign_count} ({benign_pct:.1f}%)")
+            self.logger.info(f"  - Attack: {self.malicious_count} ({malicious_pct:.1f}%)")
+
+        elapsed = time.time() - self.start_time
+        if elapsed > 0:
+            rate = self.processed_count / elapsed
+            self.logger.info(f"\nProcessing rate: {rate:.2f} msg/sec")
+            self.logger.info(f"Total runtime: {elapsed:.1f} seconds")
+
+        self.logger.info("=" * 60)
+        self.logger.info("")
+
     def stop(self) -> None:
         """Stop service và cleanup resources."""
         # Log final summary
@@ -657,8 +704,8 @@ def main():
     parser = argparse.ArgumentParser(description="Level 1 CNN Prediction Service")
     parser.add_argument("--kafka-servers", default="localhost:9092", help="Kafka servers")
     parser.add_argument("--group-id", default="level1_cnn_service", help="Consumer group ID")
-    parser.add_argument("--input-topic", default="cnn_preprocess_data", help="Input topic")
-    parser.add_argument("--output-topic", default="level_1_predictions", help="Output topic")
+    parser.add_argument("--input-topic", default="preprocess_data_cnn", help="Input topic")
+    parser.add_argument("--output-topic", default="level_1_predictions_cnn", help="Output topic")
     parser.add_argument("--model-path", default="artifacts_cnn/cnn_model_best.h5", help="Path to CNN model")
     parser.add_argument("--scaler-path", default="artifacts_cnn/scaler.joblib", help="Path to scaler")
     parser.add_argument("--label-encoder-path", default="artifacts_cnn/label_encoder.joblib", help="Path to label encoder")

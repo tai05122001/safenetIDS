@@ -45,8 +45,8 @@ class Level2CNNPredictionService:
         self,
         kafka_servers: str = "localhost:9092",
         group_id: str = "level2_cnn_service",
-        input_topic: str = "level_1_predictions",
-        output_topic: str = "level_2_predictions",
+        input_topic: str = "level_1_predictions_cnn",
+        output_topic: str = "level_2_predictions_cnn",
         model_path: str = "artifacts_cnn_level2/attack_classifier_cnn_best.h5",
         scaler_path: str = "artifacts_cnn_level2/scaler.joblib",
         label_encoder_path: str = "artifacts_cnn_level2/label_encoder.joblib",
@@ -843,8 +843,8 @@ def main():
     parser = argparse.ArgumentParser(description="Level 2 CNN Attack Types Prediction Service")
     parser.add_argument("--kafka-servers", default="localhost:9092", help="Kafka servers")
     parser.add_argument("--group-id", default="level2_cnn_service", help="Consumer group ID")
-    parser.add_argument("--input-topic", default="level_1_predictions", help="Input topic")
-    parser.add_argument("--output-topic", default="level_2_predictions", help="Output topic")
+    parser.add_argument("--input-topic", default="level_1_predictions_cnn", help="Input topic")
+    parser.add_argument("--output-topic", default="level_2_predictions_cnn", help="Output topic")
     parser.add_argument("--model-path", default="artifacts_cnn_level2/attack_classifier_cnn_final.h5", help="Path to CNN model")
     parser.add_argument("--scaler-path", default="artifacts_cnn_level2/scaler.joblib", help="Path to scaler")
     parser.add_argument("--label-encoder-path", default="artifacts_cnn_level2/label_encoder.joblib", help="Path to label encoder")
